@@ -115,7 +115,9 @@ for _, pad in ipairs(PADS) do
 	sp.Parent = F
 end
 
--- Falling-block pool; LobbyFX drives these.
+-- Falling-block pool; LobbyFX drives these. Cleared first so a re-run replaces
+-- the pool instead of doubling it.
+Lobby.FX:ClearAllChildren()
 for i = 1, 26 do
 	mk("Faller", Lobby.FX, V(2.2, 2.2, 2.2), P(0, -80, 0), C.white, NEON, { tr = 1 })
 		:SetAttribute("Slot", i)
