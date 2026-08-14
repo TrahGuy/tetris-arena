@@ -1,0 +1,8 @@
+# Roblox Studio
+*.rbxl.lock
+*.rbxlx.lock
+*.rbxm.lock
+
+# OS
+Thumbs.db
+desktop.ini
