@@ -7,9 +7,11 @@
 
 local Lobby = workspace:WaitForChild("Lobby")
 local FU, FT, FS, FE = Lobby.Museum, Lobby.Training, Lobby.Social, Lobby.Secret
+-- 00_shell owns the platforms these zones stand on.
+local SHELL = { Platform = true, PlatformInlay = true, Lip = true, Cove = true }
 for _, f in ipairs({ FU, FT, FS }) do
 	for _, c in ipairs(f:GetChildren()) do
-		if c.Name ~= "Glow" and c.Name ~= "Glass" and c.Name ~= "Edge" then c:Destroy() end
+		if not SHELL[c.Name] then c:Destroy() end
 	end
 end
 FE:ClearAllChildren()

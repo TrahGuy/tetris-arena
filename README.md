@@ -31,11 +31,20 @@ open at that path). Move it in here when convenient.
 
 ## Lobby layout
 
-300 × 300 studs, deck top at y = 0. Cyan owns −X, magenta owns +X.
+300 × 300 studs. Vertical datum:
+
+| y | |
+| --- | --- |
+| −4.5 | sunken plaza floor |
+| 0 | main concourse |
+| 1.5 | zone platform tops |
+| 16 → 86 | glazing |
+| 94 | beam soffit (portal tops out at 84, leaderboard crown at 93) |
+| 102 | ceiling slab underside |
 
 | Zone | Centre | Size | Accent |
 | --- | --- | --- | --- |
-| Tetris Core (spawn) | (0, 20) | 60 × 60 | violet |
+| Tetris Core (spawn) | (0, 20) | 92 × 92 sunken plaza | violet |
 | Matchmaking | (0, −40) | 120 × 50 | orange |
 | Block Battle Portal | (0, −122) | 150 wide facade | cyan / magenta |
 | Block Museum | (−95, −20) | 50 × 50 | purple |
@@ -44,10 +53,18 @@ open at that path). Move it in here when convenient.
 | Block Lounge | (75, 95) | 60 × 60 | magenta |
 | Secret nook | (130, −132) | hidden, unlit | violet |
 
-Run `build/lighting.luau` once, then the builders in order: `00_ground` →
-`01_core` → `02_portal` → `03_stations` → `04_zones` → `05_hololights`.
-`00_ground` destroys and recreates `workspace.Lobby`, so a full rebuild means
-running all six; the others only touch their own folders.
+Run in order: `lighting` → `00_shell` → `01_core` → `02_portal` → `03_stations`
+→ `04_zones` → `05_lighting_rig` → `06_finish`. `00_shell` destroys and
+recreates `workspace.Lobby`, so a full rebuild means running the lot. Each
+builder is idempotent and only clears what it owns.
+
+Two files are cross-cutting on purpose:
+
+- **`05_lighting_rig`** owns every light in the hall. It deletes the lamps
+  01–04 drop as they build and rebuilds from one plan, so the room has a
+  scheme instead of forty unrelated point lights.
+- **`06_finish`** owns the material language — the de-neon rule, signage and
+  props. Art direction lives in one file rather than smeared across five.
 
 ### Running them without pasting them
 
@@ -63,31 +80,39 @@ Start-Process python -ArgumentList '-m','http.server','8731','--bind','127.0.0.1
 ```lua
 local Http = game:GetService("HttpService")
 Http.HttpEnabled = true                       -- persisted place setting; turn it back off
-for _, n in ipairs({ "lighting", "lobby/00_ground", "lobby/01_core", "lobby/02_portal",
-    "lobby/03_stations", "lobby/04_zones", "lobby/05_hololights" }) do
+for _, n in ipairs({ "lighting", "lobby/00_shell", "lobby/01_core", "lobby/02_portal",
+    "lobby/03_stations", "lobby/04_zones", "lobby/05_lighting_rig", "lobby/06_finish" }) do
     assert(loadstring(Http:GetAsync("http://127.0.0.1:8731/" .. n .. ".luau"), n))()
 end
 Http.HttpEnabled = false
 ```
 
-### Why the lobby is not black
+## Art direction
 
-The first pass was a true midnight — `Brightness` 0.75, `Ambient` 10/6/20, every
-surface coloured near 11/7/20 — and the result was that nothing but the neon was
-visible. A 300 × 300 deck rendered as a void. Three things fix it together, and
-removing any one of them brings the black back:
+The lobby is an **interior**, not a plain. Dark concrete and brushed metal, lit
+by its own ceiling, with the city visible through full-height glazing. The
+tetromino motif appears as structure and sculpture; it is not painted on in
+light.
 
-- **Carbon deck.** `DiamondPlate` at 42/40/49, close to neutral graphite. A
-  violet base colour on top of violet ambient reads as purple, not carbon.
-- **Glass inlays.** Nine lit panels in the gaps the zone pads leave, so the open
-  deck has something in it at ground level.
-- **White hologram lights.** 7 overhead panels and 10 pillars, 17 white lights.
-  Neon glows but lights nothing; these are what put value on the floor.
+Three rules, learned the expensive way:
 
-Plus `Ambient` up to 30/28/40, `Brightness` to 1.7, grade `Contrast` down from
-0.22 to 0.10 so the shadow end stops crushing, and atmospheric `Haze` at 2.9 —
-with the stock skybox at midnight the haze band is the only thing separating
-"night sky" from "nothing".
+1. **Neon is signage, never outline.** A glow strip around every object is a
+   wireframe, not a place. `06_finish` enforces this: emissive is reserved for
+   the marquee, piece cells, station faces, ceiling lenses, city windows and
+   cove strips. Everything else that was Neon becomes brushed metal, which still
+   catches light and reads as trim.
+2. **Bloom is what makes a scene look "neon".** At intensity 0.95 / threshold
+   0.92 every mildly bright surface bleeds and the whole image flattens into
+   haze. It now sits at 0.38 / 1.05, so only genuinely emissive signage blooms.
+3. **Neon lights nothing.** It only glows. Illumination has to come from actual
+   lights, which is why the ceiling coffers exist — and why the first version
+   was simultaneously very bright and completely unlit.
+
+The failure mode in both directions is real. Too dark (ambient 10/6/20, no
+fixtures) and a 300 × 300 hall is a void. Too bright (ambient 46/46/50, 18
+overlapping 150-stud lights) and it flattens into a pale office lobby with no
+contrast for the accents to work against. The hall wants dark surfaces with
+pools of light: ambient 26/26/31, coffer lights at 112 range and 0.8 brightness.
 
 ## What is built but not yet wired
 

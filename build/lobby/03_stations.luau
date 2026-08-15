@@ -6,7 +6,13 @@
 
 local Lobby = workspace:WaitForChild("Lobby")
 local FM, FL = Lobby.Matchmaking, Lobby.Leaderboard
-FM:ClearAllChildren(); FL:ClearAllChildren()
+-- 00_shell owns the platforms these stand on; only clear what this file made.
+local SHELL = { Platform = true, PlatformInlay = true, Lip = true, Cove = true }
+for _, f in ipairs({ FM, FL }) do
+	for _, c in ipairs(f:GetChildren()) do
+		if not SHELL[c.Name] then c:Destroy() end
+	end
+end
 
 local C = {
 	orange = Color3.fromRGB(255, 154, 43), gold = Color3.fromRGB(255, 205, 74),
@@ -45,11 +51,6 @@ end
 
 -- ── Matchmaking ───────────────────────────────────────────────────────────
 local MZ = -40
-mk("Glow", FM, V(117, 0.2, 47), P(0, 0.3, MZ), C.orange, NEON, { tr = 0.55 })
-mk("Glass", FM, V(120, 0.6, 50), P(0, 0.7, MZ), C.glass, GLASS, { collide = true, tr = 0.6, ref = 0.25 })
-for _, e in ipairs({ { 0, -25, 121.4, 1.4 }, { 0, 25, 121.4, 1.4 }, { -60, 0, 1.4, 51.4 }, { 60, 0, 1.4, 51.4 } }) do
-	mk("Edge", FM, V(e[3], 0.9, e[4]), P(e[1], 0.85, MZ + e[2]), C.orange, NEON)
-end
 
 -- PLAY sits dead centre on the spawn->portal axis and is the largest pad; the
 -- other two are pushed out to +/-42 so their signs clear the demo boards.

@@ -4,14 +4,14 @@
 -- the client; this script only places the geometry and tags it.
 
 local Lobby = workspace:WaitForChild("Lobby")
+-- The plaza itself is 00_shell's; this folder holds only the core.
 local F = Lobby.Core
-for _, c in ipairs(F:GetChildren()) do
-	if c.Name ~= "Glow" and c.Name ~= "Glass" and c.Name ~= "Edge" then c:Destroy() end
-end
+F:ClearAllChildren()
 
 local C = {
 	violet = Color3.fromRGB(176, 130, 255), white = Color3.fromRGB(234, 246, 255),
-	dark = Color3.fromRGB(28, 23, 42), darker = Color3.fromRGB(20, 17, 30),
+	dark = Color3.fromRGB(46, 45, 50), darker = Color3.fromRGB(58, 60, 68),
+	metal = Color3.fromRGB(112, 114, 124),
 }
 local PIECE = {
 	I = { col = Color3.fromRGB(34, 228, 245), cells = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } } },
@@ -24,6 +24,7 @@ local PIECE = {
 }
 local ORDER = { "I", "O", "T", "S", "Z", "J", "L" }
 local SMOOTH, NEON, FF = Enum.Material.SmoothPlastic, Enum.Material.Neon, Enum.Material.ForceField
+local METAL = Enum.Material.Metal
 
 local function mk(name, parent, size, cf, colour, mat, o)
 	o = o or {}
@@ -41,13 +42,19 @@ local function V(x, y, z) return Vector3.new(x, y, z) end
 local function P(x, y, z) return CFrame.new(x, y, z) end
 
 local CX, CY, CZ = 0, 36, 20
+-- The plaza floor sits 4.5 below the concourse, so everything at ground level
+-- inside it drops with it. The cube itself stays where it was.
+local PLAZA = -4.5
 
-mk("Dais", F, V(26, 2, 26), P(CX, 1.6, CZ), C.darker, SMOOTH, { collide = true })
+mk("Dais", F, V(26, 3, 26), P(CX, PLAZA + 1.5, CZ), C.darker, METAL,
+	{ collide = true, shadow = true })
+mk("DaisTop", F, V(22, 0.2, 22), P(CX, PLAZA + 3.1, CZ), C.dark, SMOOTH)
 for _, s in ipairs({ { 13, 0 }, { -13, 0 }, { 0, 13 }, { 0, -13 } }) do
-	mk("DaisEdge", F, V(s[2] == 0 and 1.4 or 27.4, 1.2, s[2] == 0 and 27.4 or 1.4),
-		P(CX + s[1], 2.6, CZ + s[2]), C.violet, NEON)
+	mk("DaisEdge", F, V(s[2] == 0 and 1.6 or 27.4, 1, s[2] == 0 and 27.4 or 1.6),
+		P(CX + s[1], PLAZA + 3.2, CZ + s[2]), C.metal, METAL)
 end
-mk("Beam", F, V(7, 22, 7), P(CX, 14, CZ), C.violet, FF, { tr = 0.55 })
+-- Barely there: at 0.72 this column washed straight over the marquee behind it.
+mk("Beam", F, V(6, 29.5, 6), P(CX, PLAZA + 14.75, CZ), C.violet, FF, { tr = 0.9 })
 
 local H, T = 11, 1.2
 for _, s in ipairs({ { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }) do
@@ -55,8 +62,11 @@ for _, s in ipairs({ { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }) do
 	mk("EdgeY", F, V(T, 2 * H, T), P(CX + H * s[1], CY, CZ + H * s[2]), C.white, NEON)
 	mk("EdgeZ", F, V(T, T, 2 * H + T), P(CX + H * s[1], CY + H * s[2], CZ), C.white, NEON)
 end
-mk("Hologram", F, V(17, 17, 17), P(CX, CY, CZ), C.violet, FF, { tr = 0.45 })
-mk("Heart", F, V(5, 5, 5), P(CX, CY, CZ), C.white, NEON)
+-- No solid hologram shell: it sat directly on the sightline from spawn to the
+-- marquee and fogged the title. Twelve thin edges crossing it reads as layering;
+-- a translucent 17-stud cube reads as a smear.
+mk("Heart", F, V(6, 6, 6), P(CX, CY, CZ), C.white, NEON)
+mk("HeartCage", F, V(9, 9, 9), P(CX, CY, CZ), C.violet, FF, { tr = 0.62 })
 
 -- Each piece is a Model so LobbyFX can PivotTo it; the orbit phase lives on an
 -- attribute so the script needs no table of its own.
@@ -100,16 +110,16 @@ for _, pad in ipairs(PADS) do
 	mx, mz = mx / 4, mz / 4
 	for _, c in ipairs(def.cells) do
 		local x, z = pad.x + (c[1] - mx) * PCELL, pad.z + (c[2] - mz) * PCELL
-		mk("PadCell", F, V(PCELL, 1.4, PCELL), P(x, 1.7, z),
-			def.col:Lerp(Color3.new(0, 0, 0), 0.7), SMOOTH, { collide = true })
-		mk("PadGlow", F, V(PCELL - 0.9, 0.16, PCELL - 0.9), P(x, 2.48, z), def.col, NEON)
+		mk("PadCell", F, V(PCELL, 1.4, PCELL), P(x, PLAZA + 1.7, z),
+			def.col:Lerp(C.dark, 0.62), METAL, { collide = true, shadow = true })
+		mk("PadGlow", F, V(PCELL - 1.6, 0.16, PCELL - 1.6), P(x, PLAZA + 2.48, z), def.col, NEON, { tr = 0.3 })
 	end
 	-- Non-colliding, so it never gets in the way of the platform it sits on.
 	local sp = Instance.new("SpawnLocation")
 	sp.Name = "Spawn_" .. pad.key
 	sp.Size = Vector3.new(6, 0.4, 6)
 	-- Face the core, so the first thing a new player sees is the cube.
-	sp.CFrame = CFrame.lookAt(Vector3.new(pad.x, 2.7, pad.z), Vector3.new(CX, 2.7, CZ))
+	sp.CFrame = CFrame.lookAt(Vector3.new(pad.x, PLAZA + 2.7, pad.z), Vector3.new(CX, PLAZA + 2.7, CZ))
 	sp.Anchored, sp.CanCollide, sp.Transparency = true, false, 1
 	sp.Neutral, sp.AllowTeamChangeOnTouch, sp.Duration = true, false, 0
 	sp.Parent = F
