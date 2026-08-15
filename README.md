@@ -44,9 +44,50 @@ open at that path). Move it in here when convenient.
 | Block Lounge | (75, 95) | 60 × 60 | magenta |
 | Secret nook | (130, −132) | hidden, unlit | violet |
 
-Run the builders in order: `00_ground` → `01_core` → `02_portal` → `03_stations`
-→ `04_zones`. `00_ground` destroys and recreates `workspace.Lobby`, so a full
-rebuild means running all five; the others only touch their own folders.
+Run `build/lighting.luau` once, then the builders in order: `00_ground` →
+`01_core` → `02_portal` → `03_stations` → `04_zones` → `05_hololights`.
+`00_ground` destroys and recreates `workspace.Lobby`, so a full rebuild means
+running all six; the others only touch their own folders.
+
+### Running them without pasting them
+
+`execute_luau` has `loadstring`, and Studio can `GetAsync` from localhost, so the
+on-disk copies can be run directly — which also proves the files are the real
+build rather than a paraphrase of it.
+
+```powershell
+Start-Process python -ArgumentList '-m','http.server','8731','--bind','127.0.0.1' `
+  -WorkingDirectory 'D:\KAPE\Tetris Arena\build' -WindowStyle Hidden
+```
+
+```lua
+local Http = game:GetService("HttpService")
+Http.HttpEnabled = true                       -- persisted place setting; turn it back off
+for _, n in ipairs({ "lighting", "lobby/00_ground", "lobby/01_core", "lobby/02_portal",
+    "lobby/03_stations", "lobby/04_zones", "lobby/05_hololights" }) do
+    assert(loadstring(Http:GetAsync("http://127.0.0.1:8731/" .. n .. ".luau"), n))()
+end
+Http.HttpEnabled = false
+```
+
+### Why the lobby is not black
+
+The first pass was a true midnight — `Brightness` 0.75, `Ambient` 10/6/20, every
+surface coloured near 11/7/20 — and the result was that nothing but the neon was
+visible. A 300 × 300 deck rendered as a void. Three things fix it together, and
+removing any one of them brings the black back:
+
+- **Carbon deck.** `DiamondPlate` at 42/40/49, close to neutral graphite. A
+  violet base colour on top of violet ambient reads as purple, not carbon.
+- **Glass inlays.** Nine lit panels in the gaps the zone pads leave, so the open
+  deck has something in it at ground level.
+- **White hologram lights.** 7 overhead panels and 10 pillars, 17 white lights.
+  Neon glows but lights nothing; these are what put value on the floor.
+
+Plus `Ambient` up to 30/28/40, `Brightness` to 1.7, grade `Contrast` down from
+0.22 to 0.10 so the shadow end stops crushing, and atmospheric `Haze` at 2.9 —
+with the stock skybox at midnight the haze band is the only thing separating
+"night sky" from "nothing".
 
 ## What is built but not yet wired
 

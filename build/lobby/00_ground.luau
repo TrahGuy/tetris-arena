@@ -23,11 +23,17 @@ local C = {
 	purple = Color3.fromRGB(139, 43, 255), violet = Color3.fromRGB(176, 130, 255),
 	white = Color3.fromRGB(234, 246, 255),
 	cyDim = Color3.fromRGB(0, 70, 78), mgDim = Color3.fromRGB(80, 14, 68),
-	dark = Color3.fromRGB(11, 7, 20), darker = Color3.fromRGB(7, 4, 13),
-	deep = Color3.fromRGB(5, 3, 10), glass = Color3.fromRGB(20, 32, 58),
-	tower = Color3.fromRGB(9, 6, 16),
+	-- Nothing here is near-black any more. At true midnight a 300x300 deck
+	-- coloured 11/7/20 rendered as a void; these read as dark carbon instead.
+	-- Kept close to neutral graphite: ambient is violet, and a violet base
+	-- colour on top of it made the floor read as purple rather than carbon.
+	carbon = Color3.fromRGB(42, 40, 49), carbonDark = Color3.fromRGB(29, 28, 35),
+	dark = Color3.fromRGB(28, 23, 42), darker = Color3.fromRGB(19, 16, 29),
+	deep = Color3.fromRGB(16, 14, 24), glass = Color3.fromRGB(34, 52, 84),
+	tower = Color3.fromRGB(16, 13, 26),
 }
 local SMOOTH, NEON, GLASS = Enum.Material.SmoothPlastic, Enum.Material.Neon, Enum.Material.Glass
+local CARBON = Enum.Material.DiamondPlate -- the closest thing Roblox has to a carbon weave
 
 local function mk(name, parent, size, cf, colour, mat, o)
 	o = o or {}
@@ -46,9 +52,9 @@ local function V(x, y, z) return Vector3.new(x, y, z) end
 local function P(x, y, z) return CFrame.new(x, y, z) end
 
 -- ── Deck ──────────────────────────────────────────────────────────────────
-mk("Deck", F.Ground, V(300, 6, 300), P(0, -3, 0), C.dark, SMOOTH,
-	{ collide = true, shadow = true, ref = 0.15 })
-mk("Tier2", F.Ground, V(270, 24, 270), P(0, -18, 0), C.darker, SMOOTH, { collide = true })
+mk("Deck", F.Ground, V(300, 6, 300), P(0, -3, 0), C.carbon, CARBON,
+	{ collide = true, shadow = true, ref = 0.08 })
+mk("Tier2", F.Ground, V(270, 24, 270), P(0, -18, 0), C.carbonDark, CARBON, { collide = true })
 mk("Tier3", F.Ground, V(212, 30, 212), P(0, -45, 0), C.deep, SMOOTH, { collide = true })
 
 for i = -5, 5 do
@@ -89,6 +95,29 @@ for _, z in ipairs(ZONES) do
 	mk("Edge", dest, V(z.w + 1.4, 0.9, 1.4), P(z.x, 0.85, z.z + hd), z.c, NEON)
 	mk("Edge", dest, V(1.4, 0.9, z.d + 1.4), P(z.x - hw, 0.85, z.z), z.c, NEON)
 	mk("Edge", dest, V(1.4, 0.9, z.d + 1.4), P(z.x + hw, 0.85, z.z), z.c, NEON)
+end
+
+-- ── Glass inlays ──────────────────────────────────────────────────────────
+-- The deck between zones was the emptiest thing in the lobby. These sit in the
+-- gaps the zone pads leave, each lit from underneath, so the open span has
+-- something in it at ground level instead of unbroken floor.
+local INLAYS = {
+	{ x = -53, z = 28, w = 40, d = 44 }, { x = 53, z = 28, w = 40, d = 44 },
+	{ x = 0, z = 92, w = 56, d = 40 },
+	{ x = 0, z = -82, w = 56, d = 32 },
+	{ x = -132, z = 40, w = 32, d = 60 }, { x = 132, z = 40, w = 32, d = 60 },
+	{ x = -105, z = -80, w = 40, d = 34 }, { x = 105, z = -80, w = 40, d = 34 },
+	{ x = 0, z = 130, w = 60, d = 32 },
+}
+for _, p in ipairs(INLAYS) do
+	mk("InlayGlow", F.Ground, V(p.w - 4, 0.18, p.d - 4), P(p.x, 0.25, p.z), C.white, NEON, { tr = 0.72 })
+	mk("Inlay", F.Ground, V(p.w, 0.4, p.d), P(p.x, 0.55, p.z), C.glass, GLASS,
+		{ collide = true, tr = 0.62, ref = 0.3 })
+	local hw, hd = p.w / 2, p.d / 2
+	mk("InlayEdge", F.Ground, V(p.w + 0.8, 0.5, 0.8), P(p.x, 0.7, p.z - hd), C.white, NEON, { tr = 0.35 })
+	mk("InlayEdge", F.Ground, V(p.w + 0.8, 0.5, 0.8), P(p.x, 0.7, p.z + hd), C.white, NEON, { tr = 0.35 })
+	mk("InlayEdge", F.Ground, V(0.8, 0.5, p.d + 0.8), P(p.x - hw, 0.7, p.z), C.white, NEON, { tr = 0.35 })
+	mk("InlayEdge", F.Ground, V(0.8, 0.5, p.d + 0.8), P(p.x + hw, 0.7, p.z), C.white, NEON, { tr = 0.35 })
 end
 
 -- ── Paths ─────────────────────────────────────────────────────────────────

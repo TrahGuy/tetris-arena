@@ -11,7 +11,7 @@ end
 
 local C = {
 	violet = Color3.fromRGB(176, 130, 255), white = Color3.fromRGB(234, 246, 255),
-	dark = Color3.fromRGB(11, 7, 20), darker = Color3.fromRGB(7, 4, 13),
+	dark = Color3.fromRGB(28, 23, 42), darker = Color3.fromRGB(20, 17, 30),
 }
 local PIECE = {
 	I = { col = Color3.fromRGB(34, 228, 245), cells = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } } },

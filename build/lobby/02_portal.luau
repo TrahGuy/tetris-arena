@@ -10,9 +10,9 @@ F:ClearAllChildren()
 local C = {
 	cy = Color3.fromRGB(0, 245, 255), mg = Color3.fromRGB(255, 43, 214),
 	mid = Color3.fromRGB(150, 60, 255), violet = Color3.fromRGB(176, 130, 255),
-	white = Color3.fromRGB(234, 246, 255), panel = Color3.fromRGB(18, 12, 31),
-	inset = Color3.fromRGB(17, 11, 30), ground = Color3.fromRGB(13, 9, 24),
-	empty = Color3.fromRGB(28, 24, 46), seam = Color3.fromRGB(96, 62, 168),
+	white = Color3.fromRGB(234, 246, 255), panel = Color3.fromRGB(30, 25, 45),
+	inset = Color3.fromRGB(24, 19, 38), ground = Color3.fromRGB(18, 15, 28),
+	empty = Color3.fromRGB(28, 24, 46), seam = Color3.fromRGB(112, 78, 190),
 }
 local SMOOTH, NEON, FF = Enum.Material.SmoothPlastic, Enum.Material.Neon, Enum.Material.ForceField
 

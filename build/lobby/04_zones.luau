@@ -18,10 +18,11 @@ local C = {
 	purple = Color3.fromRGB(139, 43, 255), gold = Color3.fromRGB(255, 205, 74),
 	cy = Color3.fromRGB(0, 245, 255), mg = Color3.fromRGB(255, 43, 214),
 	white = Color3.fromRGB(234, 246, 255), violet = Color3.fromRGB(176, 130, 255),
-	muted = Color3.fromRGB(150, 142, 178), dark = Color3.fromRGB(11, 7, 20),
-	darker = Color3.fromRGB(7, 4, 13), panel = Color3.fromRGB(14, 9, 25),
-	ground = Color3.fromRGB(13, 9, 24), empty = Color3.fromRGB(28, 24, 46),
-	galaxy = Color3.fromRGB(74, 24, 140), secret = Color3.fromRGB(18, 14, 30),
+	muted = Color3.fromRGB(150, 142, 178), dark = Color3.fromRGB(28, 23, 42),
+	darker = Color3.fromRGB(20, 17, 30), panel = Color3.fromRGB(30, 25, 45),
+	ground = Color3.fromRGB(18, 15, 28), empty = Color3.fromRGB(28, 24, 46),
+	galaxy = Color3.fromRGB(74, 24, 140),
+	secret = Color3.fromRGB(20, 16, 32), -- the nook stays dimmer than everywhere else on purpose
 }
 local SMOOTH, NEON, FF, GLASS =
 	Enum.Material.SmoothPlastic, Enum.Material.Neon, Enum.Material.ForceField, Enum.Material.Glass

@@ -12,8 +12,8 @@ local C = {
 	orange = Color3.fromRGB(255, 154, 43), gold = Color3.fromRGB(255, 205, 74),
 	red = Color3.fromRGB(255, 58, 74), blue = Color3.fromRGB(43, 107, 255),
 	violet = Color3.fromRGB(176, 130, 255), white = Color3.fromRGB(234, 246, 255),
-	dark = Color3.fromRGB(11, 7, 20), darker = Color3.fromRGB(7, 4, 13),
-	glass = Color3.fromRGB(20, 32, 58), panel = Color3.fromRGB(14, 9, 25),
+	dark = Color3.fromRGB(28, 23, 42), darker = Color3.fromRGB(20, 17, 30),
+	glass = Color3.fromRGB(34, 52, 84), panel = Color3.fromRGB(30, 25, 45),
 	muted = Color3.fromRGB(150, 142, 178),
 }
 local SMOOTH, NEON, FF, GLASS =
