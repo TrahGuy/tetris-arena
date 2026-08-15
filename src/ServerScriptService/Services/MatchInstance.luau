@@ -30,7 +30,9 @@ local MISMATCHES_BEFORE_RESYNC = 3
 local function makeSide(spec: any, seed: number)
 	local side = {
 		player = spec.player,
-		name = spec.player and spec.player.DisplayName or nil,
+		-- spec.name lets a side exist without a Player behind it, which is what
+		-- makes a two-player match testable without two clients.
+		name = spec.name or (spec.player and spec.player.DisplayName) or nil,
 		alive = true,
 		lastIndex = 0,
 		lastLockAt = 0,
@@ -131,20 +133,44 @@ function MatchInstance:_reject(side: any, why: string)
 	self:_resync(side)
 end
 
+-- A full restatement of the board, not just the cells.
+--
+-- The bag matters most: if the piece sequences drifted apart, sending only
+-- cells leaves the client playing a different piece to the one the server
+-- expects and every subsequent lock is rejected. `index` matters nearly as
+-- much — the client keeps numbering its locks while a rejected one leaves the
+-- server's counter behind, so without realigning it here a single rejection
+-- would cascade into a permanently broken player.
 function MatchInstance:_resync(side: any)
-	if not side.player then return end
 	local b = side.board
-	Remotes.Resync:FireClient(side.player, {
-		cells = b:snapshot(),
+	local payload = {
+		cells = b.cells,
+		piece = b.piece and table.clone(b.piece) or nil,
+		hold = b.hold,
+		holdUsed = b.holdUsed,
+		bag = b.bag:save(),
 		combo = b.combo,
 		b2b = b.b2b,
-	})
+		index = side.lastIndex,
+	}
+	if side.player then
+		Remotes.Resync:FireClient(side.player, payload)
+	end
+	if self.onResync then
+		self.onResync(side, payload)
+	end
 	side.mismatches = 0
 end
 
 function MatchInstance:onLock(player: Player, msg: any)
 	local side = self:sideFor(player)
-	if not side or self.finished or type(msg) ~= "table" then return end
+	if not side then return end
+	self:applyLock(side, msg)
+end
+
+-- Split from onLock so a side can be driven without a Player attached.
+function MatchInstance:applyLock(side: any, msg: any)
+	if self.finished or type(msg) ~= "table" then return end
 
 	-- Cosmetic snapshot relay, and the divergence check.
 	if msg.snapshot then
@@ -250,6 +276,11 @@ function MatchInstance:_send(from: any, rows: number)
 	target.board:queueGarbage(rows, gap, self.elapsed + Tuning.GARBAGE_DELAY)
 	if target.player then
 		Remotes.Garbage:FireClient(target.player, { rows = rows, gapCol = gap })
+	end
+	-- Same information the client gets, for anything else that needs it — the
+	-- two-player test mirrors it onto its stand-in client boards.
+	if self.onGarbage then
+		self.onGarbage(target, rows, gap)
 	end
 end
 

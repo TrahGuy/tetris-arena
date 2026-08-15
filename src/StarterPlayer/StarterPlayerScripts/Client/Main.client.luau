@@ -10,6 +10,7 @@ local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
 local Attack = require(Shared.Attack)
+local Bag = require(Shared.Bag)
 local Net = require(Shared.Net)
 local Remotes = require(Shared.Remotes)
 
@@ -18,6 +19,7 @@ local Hud = require(script.Parent.Hud)
 local LobbyUi = require(script.Parent.LobbyUi)
 local InputController = require(script.Parent.InputController)
 local PadController = require(script.Parent.PadController)
+local TouchControls = require(script.Parent.TouchControls)
 local SoundKit = require(script.Parent.Sound)
 local Fx = require(script.Parent.Fx)
 
@@ -60,12 +62,18 @@ local settings = {}
 
 local hud = Hud.new(gui, {})
 local ui
+local touch = TouchControls.new(gui, nil)
+-- The keyboard hint is wrong on a device with no keyboard.
+if TouchControls.shouldShow() then
+	hud.hint.Text = "TAP AND HOLD TO MOVE  ·  DROP TO PLACE"
+end
 
 local function setState(next_: string)
 	state = next_
 	local playing = (state == Enums.State.Playing or state == Enums.State.Countdown)
 	hud:show(playing)
 	backdrop.Visible = playing
+	touch:setVisible(playing)
 	ui:showQueue(state == Enums.State.Queued)
 	if state == Enums.State.Idle then
 		ui:setChromeVisible(true)
@@ -74,6 +82,7 @@ end
 
 local function teardownMatch()
 	if input then input:disable(); input = nil end
+	touch:setInput(nil)
 	if fx then fx:destroy(); fx = nil end
 	sim = nil
 	matchInfo = nil
@@ -165,6 +174,7 @@ local function startSim(seed: number, opts: any, info: any?)
 		end,
 	})
 	input:enable()
+	touch:setInput(input)
 	hud:setOpponentVisible(matchInfo ~= nil and matchInfo.networked == true)
 end
 
@@ -273,12 +283,24 @@ end)
 
 -- The server disagreed with our board. Snap to its version rather than kick:
 -- treating every mismatch as cheating turns our own desync bugs into bans.
+--
+-- The bag and the lock index have to be adopted too, not just the cells. A
+-- drifted piece sequence means every following placement is "not the piece in
+-- play", and a stale index means every following lock is "out of order" — so a
+-- resync that only fixed cells would leave the player permanently rejected.
 Remotes.Resync.OnClientEvent:Connect(function(msg)
 	if not sim then return end
 	local b = sim.board
-	for i = 1, #msg.cells do b.cells[i] = msg.cells[i] end
+	for i = 1, #msg.cells do
+		b.cells[i] = msg.cells[i]
+	end
+	b.piece = msg.piece
+	b.hold, b.holdUsed = msg.hold, msg.holdUsed == true
+	if msg.bag then b.bag = Bag.load(msg.bag) end
 	b.combo, b.b2b = msg.combo or 0, msg.b2b or false
-	fx:flashScreen(Theme.C.gold, 0.25)
+	b.gravityAcc, b.lockTimer, b.lockResets, b.grounded = 0, 0, 0, false
+	if msg.index then sim.lockIndex = msg.index end
+	if fx then fx:flashScreen(Theme.C.gold, 0.25) end
 end)
 
 Remotes.Result.OnClientEvent:Connect(function(payload)

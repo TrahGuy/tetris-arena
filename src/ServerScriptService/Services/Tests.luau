@@ -7,11 +7,20 @@
 --
 --   require(game.ServerScriptService.Services.Tests).run()
 
--- Modules are resolved inside run() rather than at require time so a caller can
--- hand in a freshly cloned Shared folder. require() caches per ModuleScript
--- instance and the MCP command thread keeps its own cache, so editing a module
--- and re-running would otherwise silently re-run the stale copy.
-local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService
+-- RUN THESE IN PLAY MODE, from the Server datamodel:
+--
+--   require(game.ServerScriptService.Services.Tests).run()
+--
+-- Running them from Edit over MCP is a trap. require() caches per ModuleScript
+-- instance and the MCP command thread keeps its own cache, so an edited module
+-- silently re-runs as its stale self. Cloning the Shared folder fixes it for
+-- modules this file requires directly — but BotService and MatchInstance reach
+-- Shared by absolute path, so they still pick up the cached originals, and the
+-- two halves of a test end up running different versions of Board. Play mode
+-- builds a fresh datamodel, so everything there is current by construction.
+--
+-- Modules are still resolved inside run() so a caller *can* pass a clone.
+local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -277,6 +286,36 @@ function T.tspin()
 	check("tspin: two corners is not a spin", b:detectTSpin() == nil)
 end
 
+-- The bot clones the board dozens of times per decision to try placements. If a
+-- clone shares any mutable state with its source, that search silently corrupts
+-- the real game — and because the bag is what spawning consumes, the damage is
+-- the piece sequence, which is exactly what client and server must agree on.
+function T.cloneIsolation()
+	local b = Board.new(4242)
+	local before = b.bag:peek(6)
+
+	local trial = b:clone()
+	for _ = 1, 30 do
+		if not trial.alive then break end
+		trial:hardDrop()
+		trial:step(Tuning.CLEAR_DELAY + 0.02)
+	end
+
+	local after = b.bag:peek(6)
+	local same = true
+	for i = 1, 6 do
+		if before[i] ~= after[i] then same = false end
+	end
+	check("clone: hammering a clone leaves the source bag untouched", same,
+		("%s -> %s"):format(table.concat(before, ","), table.concat(after, ",")))
+	-- A fresh board has spawned a piece but not locked one.
+	eq("clone: source has locked nothing", b.stats.pieces, 0)
+	check("clone: source cells untouched", countFilled(b) == 0)
+
+	-- And the clone must actually be usable, not a frozen snapshot.
+	check("clone: the clone itself advanced", trial.stats.pieces > 1)
+end
+
 function T.determinism()
 	-- The whole networking model rests on this: same seed and same inputs must
 	-- give byte-identical boards, or client prediction drifts from the server.
@@ -430,6 +469,134 @@ function T.bots()
 		("%d holes"):format(holes))
 end
 
+-- Human vs human, without two clients.
+--
+-- Studio over MCP can only drive one player, so the one path the live tests
+-- could never reach is the one the whole game is about. Two stand-in "clients"
+-- run their own boards and report locks exactly as Main.client does; the match
+-- validates every one against its shadow. If reachability, the piece-identity
+-- check or the garbage routing were wrong between two players, this fails.
+function T.twoPlayer()
+	local seed = 8899
+	-- MIN_LOCK_INTERVAL is a wall-clock anti-cheat guard. A headless loop
+	-- reports hundreds of locks per real second, so it has to come off here.
+	local realMin = Tuning.MIN_LOCK_INTERVAL
+	Tuning.MIN_LOCK_INTERVAL = 0
+
+	local ok, err = pcall(function()
+		local match = MatchInstance.new(99, { name = "P1" }, { name = "P2" }, { seed = seed })
+		match.state = "playing" -- skip the countdown timer
+
+		-- Both clients must use the MATCH seed. The server gives each shadow the
+		-- same seed and sends it to both clients, so a client on a different
+		-- seed sees a different piece sequence and every lock is correctly
+		-- rejected as "not the piece in play".
+		local clients = {
+			[match.a] = BotService.new(seed, "overdrive"),
+			[match.b] = BotService.new(seed, "neon"),
+		}
+		local dt, routed = 1 / 60, 0
+		local index = { [match.a] = 0, [match.b] = 0 }
+		local prevSent = { [match.a] = 0, [match.b] = 0 }
+		-- Mirror the server's garbage onto the stand-in client boards, which is
+		-- what a real client does when it receives the Garbage remote.
+		match.onGarbage = function(target, rows, gap)
+			local cb = clients[target]
+			if cb then
+				cb.board:queueGarbage(rows, gap, cb.board.time + Tuning.GARBAGE_DELAY)
+			end
+		end
+		-- The recovery path, driven exactly as Main.client drives it. Garbage
+		-- landing a frame apart between client and shadow is a legitimate
+		-- divergence, so what matters is not that it never happens but that the
+		-- player keeps playing afterwards instead of being rejected forever.
+		local resyncs = 0
+		match.onResync = function(side, payload)
+			local cb = clients[side]
+			if not cb then return end
+			resyncs += 1
+			local b = cb.board
+			for i = 1, #payload.cells do b.cells[i] = payload.cells[i] end
+			b.piece = payload.piece and table.clone(payload.piece) or nil
+			b.hold, b.holdUsed = payload.hold, payload.holdUsed == true
+			b.bag = Bag.load(payload.bag)
+			b.combo, b.b2b = payload.combo, payload.b2b
+			b.gravityAcc, b.lockTimer, b.lockResets, b.grounded = 0, 0, 0, false
+			cb.plan, cb.planFor = nil, -1
+			index[side] = payload.index
+		end
+
+		local finishedWith = nil
+		match.onFinished = function(_, loser) finishedWith = loser or "draw" end
+
+		for _ = 1, 60 * 120 do
+			if match.finished then break end
+			match:update(dt)
+			for side, cb in pairs(clients) do
+				if cb.board.alive and side.alive then
+					cb.board.time = match.elapsed
+					cb:update(dt)
+					for _, e in ipairs(cb.board:drain()) do
+						if e.kind == "lock" and e.data.placed then
+							index[side] += 1
+							match:applyLock(side, {
+								index = index[side],
+								kind = e.data.placed.kind,
+								rot = e.data.placed.rot,
+								x = e.data.placed.x,
+								y = e.data.placed.y,
+							})
+						elseif e.kind == "topout" then
+							match:applyLock(side, { topout = true })
+						end
+					end
+				end
+			end
+			for side in pairs(clients) do
+				if side.board.stats.sent > prevSent[side] then
+					routed += side.board.stats.sent - prevSent[side]
+					prevSent[side] = side.board.stats.sent
+				end
+			end
+		end
+
+		-- Rejections are allowed to be rare, not impossible: garbage landing one
+		-- frame apart on client and shadow is a legitimate divergence. What is
+		-- not allowed is a rejection that never recovers, which is why the ratio
+		-- is checked rather than the count.
+		local aTotal = match.a.accepted + match.a.rejects
+		local bTotal = match.b.accepted + match.b.rejects
+		check("2p: P1 rejections stayed rare", match.a.rejects <= aTotal * 0.05,
+			("%d of %d, last reason '%s'"):format(match.a.rejects, aTotal, tostring(match.a.lastReject)))
+		check("2p: P2 rejections stayed rare", match.b.rejects <= bTotal * 0.05,
+			("%d of %d, last reason '%s'"):format(match.b.rejects, bTotal, tostring(match.b.lastReject)))
+		check("2p: resync recovered rather than cascading", resyncs == 0 or match.a.accepted > 40,
+			("%d resyncs"):format(resyncs))
+		check("2p: P1's locks were accepted", match.a.accepted > 40,
+			("%d accepted"):format(match.a.accepted))
+		check("2p: P2's locks were accepted", match.b.accepted > 40,
+			("%d accepted"):format(match.b.accepted))
+		-- The shadow must have applied every accepted lock, or the server and
+		-- the client are looking at different boards.
+		eq("2p: P1 shadow matches accepted count", match.a.board.stats.pieces, match.a.accepted)
+		eq("2p: P2 shadow matches accepted count", match.b.board.stats.pieces, match.b.accepted)
+		check("2p: both sides cleared lines",
+			match.a.board.stats.lines > 0 and match.b.board.stats.lines > 0,
+			("%d / %d"):format(match.a.board.stats.lines, match.b.board.stats.lines))
+		check("2p: garbage crossed between the players", routed > 0, tostring(routed))
+		check("2p: the match resolved or was still legitimately running",
+			match.finished or (match.a.alive and match.b.alive))
+		if match.finished then
+			check("2p: a result was produced", finishedWith ~= nil)
+		end
+	end)
+
+	Tuning.MIN_LOCK_INTERVAL = realMin
+	if not ok then
+		error(err, 0)
+	end
+end
+
 function T.run(root: Instance?, services: Instance?)
 	root = root or game:GetService("ReplicatedStorage"):WaitForChild("Shared")
 	services = services or game:GetService("ServerScriptService"):WaitForChild("Services")
@@ -441,11 +608,12 @@ function T.run(root: Instance?, services: Instance?)
 	Pieces = require((root :: any).Pieces)
 	Tuning = require((root :: any).Tuning)
 	BotService = require((services :: any).BotService)
+	MatchInstance = require((services :: any).MatchInstance)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
-		"topOuts", "attack", "net", "tspin", "determinism", "gravityAndLock", "holdAndReach",
-		"reachCost", "bots" }
+		"topOuts", "attack", "net", "tspin", "cloneIsolation", "determinism",
+		"gravityAndLock", "holdAndReach", "reachCost", "bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])
 		if not ok then

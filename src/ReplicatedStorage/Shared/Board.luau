@@ -524,11 +524,20 @@ function Board:reachable(kind: number, rot: number, x: number, y: number): boole
 	return false
 end
 
--- Shallow copy sufficient for the bot's placement search.
+-- A copy safe to mutate. Used by the bot to try a placement without touching
+-- the real board.
+--
+-- The bags MUST be copied, not shared. A trial board that hard-drops locks and
+-- spawns, and spawning pops the bag — so a shared bag means the bot's search
+-- eats the real piece sequence, dozens of pieces per decision. That desyncs the
+-- board from every other copy running the same seed, which is the one invariant
+-- the whole networking model rests on.
 function Board:clone()
 	local c = setmetatable({}, Board)
 	for k, v in pairs(self) do c[k] = v end
 	c.cells = table.clone(self.cells)
+	c.bag = Bag.load(self.bag:save())
+	c.garbageBag = Bag.load(self.garbageBag:save())
 	c.incoming = {}
 	c.events = {}
 	c.stats = table.clone(self.stats)

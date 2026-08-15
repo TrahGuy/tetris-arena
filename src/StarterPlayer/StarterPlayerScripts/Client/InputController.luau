@@ -14,20 +14,24 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Tuning = require(ReplicatedStorage:WaitForChild("Shared").Tuning)
+local SoundKit = require(script.Parent.Sound)
 
 local InputController = {}
 InputController.__index = InputController
 
+-- Gamepad bindings sit alongside the keys: ContextActionService takes both in
+-- one BindAction, so a controller needs no separate code path.
 local ACTIONS = {
-	{ name = "BA_Left", keys = { Enum.KeyCode.Left, Enum.KeyCode.A } },
-	{ name = "BA_Right", keys = { Enum.KeyCode.Right, Enum.KeyCode.D } },
-	{ name = "BA_Soft", keys = { Enum.KeyCode.Down, Enum.KeyCode.S } },
-	{ name = "BA_Hard", keys = { Enum.KeyCode.Space } },
-	{ name = "BA_CW", keys = { Enum.KeyCode.Up, Enum.KeyCode.X } },
-	{ name = "BA_CCW", keys = { Enum.KeyCode.Z } },
-	{ name = "BA_Flip", keys = { Enum.KeyCode.V } },
-	{ name = "BA_Hold", keys = { Enum.KeyCode.C, Enum.KeyCode.LeftShift } },
-	{ name = "BA_Forfeit", keys = { Enum.KeyCode.F } },
+	{ name = "BA_Left", keys = { Enum.KeyCode.Left, Enum.KeyCode.A, Enum.KeyCode.DPadLeft } },
+	{ name = "BA_Right", keys = { Enum.KeyCode.Right, Enum.KeyCode.D, Enum.KeyCode.DPadRight } },
+	{ name = "BA_Soft", keys = { Enum.KeyCode.Down, Enum.KeyCode.S, Enum.KeyCode.DPadDown } },
+	{ name = "BA_Hard", keys = { Enum.KeyCode.Space, Enum.KeyCode.ButtonA, Enum.KeyCode.DPadUp } },
+	{ name = "BA_CW", keys = { Enum.KeyCode.Up, Enum.KeyCode.X, Enum.KeyCode.ButtonB } },
+	{ name = "BA_CCW", keys = { Enum.KeyCode.Z, Enum.KeyCode.ButtonX } },
+	{ name = "BA_Flip", keys = { Enum.KeyCode.V, Enum.KeyCode.ButtonY } },
+	{ name = "BA_Hold", keys = { Enum.KeyCode.C, Enum.KeyCode.LeftShift, Enum.KeyCode.ButtonL1,
+		Enum.KeyCode.ButtonR1 } },
+	{ name = "BA_Forfeit", keys = { Enum.KeyCode.F, Enum.KeyCode.ButtonSelect } },
 }
 
 function InputController.new(sim: any, hooks: any?)
@@ -46,28 +50,36 @@ function InputController.new(sim: any, hooks: any?)
 	}, InputController)
 end
 
+-- Cues fire on the initial press only. Playing one per DAS repeat turns a slide
+-- to the wall into a machine gun.
 function InputController:_press(action: string)
 	local sim = self.sim
 	if action == "BA_Left" then
 		self.heldLeft = true
 		self:_setDir(-1)
 		sim:push("left")
+		SoundKit.play("move")
 	elseif action == "BA_Right" then
 		self.heldRight = true
 		self:_setDir(1)
 		sim:push("right")
+		SoundKit.play("move")
 	elseif action == "BA_Soft" then
 		sim:setSoftDrop(true)
 	elseif action == "BA_Hard" then
 		sim:push("hardDrop")
 	elseif action == "BA_CW" then
 		sim:push("cw")
+		SoundKit.play("rotate")
 	elseif action == "BA_CCW" then
 		sim:push("ccw")
+		SoundKit.play("rotate", 0.9)
 	elseif action == "BA_Flip" then
 		sim:push("flip")
+		SoundKit.play("rotate", 0.8)
 	elseif action == "BA_Hold" then
 		sim:push("hold")
+		SoundKit.play("hold")
 	elseif action == "BA_Forfeit" then
 		if self.hooks.onForfeit then self.hooks.onForfeit() end
 	end
@@ -95,6 +107,16 @@ function InputController:_setDir(d: number)
 		self.arrTimer = 0
 		self.charged = false
 	end
+end
+
+-- Public entry points for the on-screen touch pad, which drives exactly the
+-- same actions as a key so DAS, arming and sound all behave identically.
+function InputController:pressAction(name: string)
+	if self.enabled and self.armed then self:_press(name) end
+end
+
+function InputController:releaseAction(name: string)
+	if self.enabled then self:_release(name) end
 end
 
 function InputController:update(dt: number)
