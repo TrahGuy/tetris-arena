@@ -7,7 +7,12 @@
     "ReplicatedStorage": {
       "$ignoreUnknownInstances": true,
       "Shared": { "$path": "src/ReplicatedStorage/Shared" },
-      "Remotes": { "$path": "src/ReplicatedStorage/Remotes" }
+
+      "//": "Remotes has no files: Shared/Remotes.luau creates the RemoteEvents at runtime. Without $ignoreUnknownInstances Rojo would prune them to match the empty directory.",
+      "Remotes": {
+        "$path": "src/ReplicatedStorage/Remotes",
+        "$ignoreUnknownInstances": true
+      }
     },
 
     "ServerScriptService": {

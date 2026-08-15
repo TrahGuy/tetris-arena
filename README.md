@@ -18,16 +18,35 @@ open at that path). Move it in here when convenient.
 | --- | --- |
 | 0 — Studio place, lighting, folder scaffold | done |
 | 1 — Lobby world (300x300, 8 zones) | done |
-| 2 — Lobby GUI | next |
-| 2.5 — Shared foundations (Tuning, Pieces, SRS, Board, Bag, Attack) | |
-| 3 — Solo Tetris | |
-| 4 — Hold / Next / ghost / HUD | |
-| 4.5 — Bot opponent + practice modes | |
-| 5 — Queue and match flow | |
-| 6 — 1v1 garbage, opponent board, KO | |
-| 6.5 — Authority hardening | |
-| 7 — Juice, audio, polish | |
-| 8 — Persistence, settings, stats | |
+| 2 — Lobby GUI | done — reinterpreted, see below |
+| 2.5 — Shared foundations | done, 158 headless tests |
+| 3 — Solo Tetris | done |
+| 4 — Hold / Next / ghost / HUD | done |
+| 4.5 — Bot opponent | done — practice is one generic board, not Sprint/Blitz |
+| 5 — Queue and match flow | done |
+| 6 — 1v1 garbage, opponent board, KO | done |
+| 6.5 — Authority hardening | done |
+| 7 — Juice | done — **no audio: no asset ids** |
+| 8 — Persistence, settings, stats | done |
+| 9 — Mobile touch / gamepad | not started (always was later) |
+
+**Phase 2 was reinterpreted.** It was written before the lobby had physical
+matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
+to the same room, so `LobbyUi` covers what the world cannot show — searching,
+results, settings, help — and starting a match belongs to the pads.
+
+## Known gaps
+
+| Gap | Why |
+| --- | --- |
+| **No audio at all** | `Sound.luau` has the mixer, volume settings, preloading and every cue call wired. It has no asset ids, because inventing them yields either a silent 404 or somebody else's sound in your game. Upload audio, paste ids into `IDS`, done. |
+| Practice is one mode | The pad gives a solo board. Sprint (40 lines) and Blitz (2 min) are not separate modes with their own goal and timer. |
+| CREATE ROOM falls through to quick play | A private match needs a friend-invite flow that does not exist. `MatchmakingService.enqueue` says so in a comment rather than silently misbehaving. |
+| RANKED queues like quick play | There is no rating system to rank against yet. |
+| T-spins score zero | Detected and shown; `Attack.TSPIN_ENABLED` is false on purpose until the base game is proven. |
+| Museum skins are display-only | No cosmetic ownership system. |
+| Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
+| Never tested with two humans | Studio-over-MCP can only drive one client. Tested extensively against the bot. |
 
 ## Lobby layout
 
