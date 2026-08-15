@@ -20,7 +20,7 @@
 -- builds a fresh datamodel, so everything there is current by construction.
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
-local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance
+local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -469,6 +469,40 @@ function T.bots()
 		("%d holes"):format(holes))
 end
 
+-- Rating is the one number players will argue about, so the maths gets pinned.
+function T.elo()
+	local w, l = Stats.elo(1000, 1000, 50, 50)
+	check("elo: the winner gains", w > 1000)
+	check("elo: the loser drops", l < 1000)
+	eq("elo: symmetric between equals", w - 1000, 1000 - l)
+
+	local upset = Stats.elo(800, 1200, 50, 50)
+	local expectedWin = Stats.elo(1200, 800, 50, 50)
+	check("elo: beating someone better is worth more",
+		(upset - 800) > (expectedWin - 1200),
+		("upset +%d vs expected +%d"):format(upset - 800, expectedWin - 1200))
+
+	local newAccount = Stats.elo(1000, 1000, 0, 0)
+	check("elo: unplaced accounts move faster", (newAccount - 1000) > (w - 1000),
+		("+%d vs +%d"):format(newAccount - 1000, w - 1000))
+
+	local _, floored = Stats.elo(2400, 105, 50, 50)
+	check("elo: rating never falls through the floor", floored >= 100, tostring(floored))
+
+	-- A rating should converge rather than drift: repeatedly beating a much
+	-- weaker opponent must yield ever-smaller gains.
+	local a, b = 1000, 1000
+	local firstGain, lastGain = 0, 0
+	for i = 1, 25 do
+		local na, nb = Stats.elo(a, b, 50 + i, 50 + i)
+		if i == 1 then firstGain = na - a end
+		lastGain = na - a
+		a, b = na, nb
+	end
+	check("elo: gains shrink as the gap widens", lastGain < firstGain,
+		("first +%d, last +%d"):format(firstGain, lastGain))
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -609,11 +643,12 @@ function T.run(root: Instance?, services: Instance?)
 	Tuning = require((root :: any).Tuning)
 	BotService = require((services :: any).BotService)
 	MatchInstance = require((services :: any).MatchInstance)
+	Stats = require((services :: any).StatsService)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
 		"topOuts", "attack", "net", "tspin", "cloneIsolation", "determinism",
-		"gravityAndLock", "holdAndReach", "reachCost", "bots", "twoPlayer" }
+		"gravityAndLock", "holdAndReach", "reachCost", "elo", "bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])
 		if not ok then

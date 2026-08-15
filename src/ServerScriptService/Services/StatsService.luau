@@ -30,8 +30,46 @@ local dirty: { [number]: boolean } = {}
 local DEFAULT = {
 	wins = 0, losses = 0, streak = 0, bestStreak = 0,
 	lines = 0, quads = 0, matches = 0, bestSprint = 0,
+	rating = 1000, peakRating = 1000, rankedWins = 0, rankedLosses = 0,
 	das = 133, arr = 0, music = 60, sfx = 80, colourblind = false,
 }
+
+-- Elo. The RANKED pad was queuing exactly like quick play, which made the label
+-- a lie; this is the smallest thing that makes it true.
+local function expectedScore(a: number, b: number): number
+	return 1 / (1 + 10 ^ ((b - a) / 400))
+end
+
+-- K falls as a player settles. A new account should find its level in a few
+-- matches; an established one should not swing 40 points on a single game.
+local function kFactor(played: number): number
+	if played < 10 then return 48 end
+	if played < 30 then return 32 end
+	return 20
+end
+
+-- The maths on its own, so it can be tested without a profile or a DataStore.
+-- Returns the winner's and loser's new ratings. Floored at 100, so a losing
+-- streak cannot bottom out into meaninglessness.
+function StatsService.elo(ratingW: number, ratingL: number, playedW: number, playedL: number)
+	local kw, kl = kFactor(playedW), kFactor(playedL)
+	local ew = expectedScore(ratingW, ratingL)
+	local el = expectedScore(ratingL, ratingW)
+	return math.max(100, math.floor(ratingW + kw * (1 - ew) + 0.5)),
+		math.max(100, math.floor(ratingL + kl * (0 - el) + 0.5))
+end
+
+function StatsService.applyElo(winner: Player, loser: Player)
+	local w, l = profiles[winner.UserId], profiles[loser.UserId]
+	if not w or not l then return end
+	w.rating, l.rating = StatsService.elo(w.rating, l.rating,
+		w.rankedWins + w.rankedLosses, l.rankedWins + l.rankedLosses)
+	w.peakRating = math.max(w.peakRating, w.rating)
+	w.rankedWins += 1
+	l.rankedLosses += 1
+	dirty[winner.UserId] = true
+	dirty[loser.UserId] = true
+end
 
 do
 	local ok, result = pcall(function()
@@ -94,11 +132,15 @@ function StatsService.save(player: Player)
 		store:UpdateAsync(key(id), function(old)
 			local merged = merge(old)
 			-- Counters accumulate across servers; settings are last-write-wins.
-			for _, k in ipairs({ "wins", "losses", "lines", "quads", "matches" }) do
+			for _, k in ipairs({ "wins", "losses", "lines", "quads", "matches",
+				"rankedWins", "rankedLosses" }) do
 				merged[k] = math.max(merged[k], profile[k])
 			end
 			merged.bestStreak = math.max(merged.bestStreak, profile.bestStreak)
+			merged.peakRating = math.max(merged.peakRating, profile.peakRating)
 			merged.streak = profile.streak
+			-- Rating has to be the live value, not a max: it is meant to fall.
+			merged.rating = profile.rating
 			if profile.bestSprint > 0 then
 				merged.bestSprint = merged.bestSprint > 0
 					and math.min(merged.bestSprint, profile.bestSprint)
@@ -155,6 +197,25 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 			dirty[player.UserId] = true
 		end
 	end
+
+	-- Leaving a ranked match still costs rating. Otherwise the way to protect a
+	-- rating is to quit whenever you are behind.
+	if match.mode == Enums.Mode.Ranked and loser and loser.player then
+		local winner = loser.other
+		if winner and winner.player then
+			StatsService.applyElo(winner.player, loser.player)
+		end
+	end
+
+	-- Push the updated profile so the rating on screen is the new one, not the
+	-- one from when they joined.
+	for _, side in ipairs({ match.a, match.b }) do
+		local player = side.player
+		if player and player.Parent and profiles[player.UserId] then
+			Remotes.Profile:FireClient(player, profiles[player.UserId])
+		end
+	end
+
 	StatsService.refreshLeaderboard()
 end
 
@@ -225,11 +286,12 @@ function StatsService.refreshLeaderboard()
 		end
 	end
 
-	table.sort(ranked, function(a, b) return a.p.wins > b.p.wins end)
+	-- Ranked by rating now that ranked play means something.
+	table.sort(ranked, function(a, b) return a.p.rating > b.p.rating end)
 	local world = {}
 	for i = 1, 5 do
 		local e = ranked[i]
-		table.insert(world, { i, e and e.name or "—", e and e.p.wins or 0 })
+		table.insert(world, { i, e and e.name or "—", e and e.p.rating or "—" })
 	end
 
 	table.sort(ranked, function(a, b) return a.p.streak > b.p.streak end)

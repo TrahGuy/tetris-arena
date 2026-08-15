@@ -327,11 +327,17 @@ function LobbyUi:applyProfile(profile: any)
 		self.settings.colourblind = profile.colourblind
 		self.cbButton.Text = "COLOURBLIND PALETTE:  " .. (profile.colourblind and "ON" or "OFF")
 	end
+	if profile.rating then
+		self.rating = profile.rating
+		self:setPlayerCount(self.playerCount or 1)
+	end
 	self:_refreshSliders()
 end
 
 function LobbyUi:setPlayerCount(n: number)
-	self.countLabel.Text = string.format("%d IN LOBBY  ·  %s", n, Players.LocalPlayer.DisplayName)
+	self.playerCount = n
+	self.countLabel.Text = string.format("%d IN LOBBY  ·  %s%s", n, Players.LocalPlayer.DisplayName,
+		self.rating and string.format("  ·  %d ELO", self.rating) or "")
 end
 
 function LobbyUi:setPrompt(title: string?, sub: string?, progress: number?)
@@ -350,24 +356,45 @@ function LobbyUi:showQueue(on: boolean)
 	self.chrome.Visible = not on
 end
 
-function LobbyUi:setQueueInfo(elapsed: number, botIn: number?)
-	self.queueSub.Text = botIn and botIn > 0
-		and string.format("No opponent yet. Matching you with a bot in %ds.", math.ceil(botIn))
-		or string.format("Looking for an opponent…  %ds", math.floor(elapsed))
+function LobbyUi:setQueueInfo(elapsed: number, botIn: number?, note: string?, title: string?)
+	self.queueTitle.Text = title or "SEARCHING"
+	self.queueSub.Text = note
+		or (botIn and botIn > 0
+			and string.format("No opponent yet. Matching you with a bot in %ds.", math.ceil(botIn))
+			or string.format("Looking for an opponent…  %ds", math.floor(elapsed)))
+	-- With no bot fallback there is nothing to count down to, so the bar just
+	-- shows the queue is alive rather than pretending to have a deadline.
 	local frac = botIn and (1 - math.clamp(botIn / Tuning.BOT_AFTER, 0, 1)) or ((elapsed % 2) / 2)
 	self.queueBar.Size = UDim2.fromScale(frac, 1)
 end
 
 function LobbyUi:showResults(payload: any, canRematch: boolean)
 	local win = payload.outcome == Enums.Result.Win
-	self.resultTitle.Text = win and "YOU WIN" or (payload.outcome == Enums.Result.Draw and "DRAW" or "DEFEAT")
-	self.resultTitle.TextColor3 = win and Theme.C.cy or Theme.C.mg
-	local reasons = {
-		[Enums.Result.Left] = "Your opponent left the match.",
-		[Enums.Result.Forfeit] = "Forfeited.",
-		[Enums.Result.Timeout] = "Time limit reached — most garbage sent wins.",
-	}
-	self.resultSub.Text = reasons[payload.reason] or (win and "Opponent topped out." or "You topped out.")
+	if payload.reason == "sprint" then
+		self.resultTitle.Text = "SPRINT CLEAR"
+		self.resultTitle.TextColor3 = Theme.C.cy
+		self.resultSub.Text = payload.sprintTime
+			and string.format("40 lines in %.2f seconds.", payload.sprintTime)
+			or "40 lines cleared."
+	elseif payload.reason == "practice" then
+		self.resultTitle.Text = "PRACTICE OVER"
+		self.resultTitle.TextColor3 = Theme.C.violet
+		self.resultSub.Text = "No stakes. Step back on the pad to go again."
+	else
+		self.resultTitle.Text = win and "YOU WIN"
+			or (payload.outcome == Enums.Result.Draw and "DRAW" or "DEFEAT")
+		self.resultTitle.TextColor3 = win and Theme.C.cy or Theme.C.mg
+		local reasons = {
+			[Enums.Result.Left] = "Your opponent left the match.",
+			[Enums.Result.Forfeit] = "Forfeited.",
+			[Enums.Result.Timeout] = "Time limit reached — most garbage sent wins.",
+		}
+		self.resultSub.Text = reasons[payload.reason]
+			or (win and "Opponent topped out." or "You topped out.")
+	end
+	if payload.rating then
+		self.rating = payload.rating
+	end
 	local s = payload.stats or {}
 	self.resultStats["LINES"].Text = tostring(s.lines or 0)
 	self.resultStats["ATTACK SENT"].Text = tostring(s.sent or 0)

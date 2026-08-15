@@ -52,6 +52,8 @@ backdrop.Parent = gui
 
 SoundKit.init()
 
+local SPRINT_GOAL = 40
+
 local state = Enums.State.Idle
 local sim, input, fx = nil, nil, nil
 local matchInfo = nil
@@ -217,7 +219,9 @@ ui = LobbyUi.new(gui, {
 local pads = PadController.new(function(mode)
 	if state ~= Enums.State.Idle then return end
 	if mode == Enums.Mode.Practice then
-		Remotes.Practice:FireServer({ mode = Enums.Mode.Practice })
+		-- The practice pad runs a sprint, so the result can be recorded against
+		-- a best time instead of vanishing.
+		Remotes.Practice:FireServer({ mode = Enums.Mode.Sprint })
 	elseif mode == Enums.Mode.Emote then
 		-- Nothing to queue; the lounge pad is decorative until Phase 7 emotes.
 	else
@@ -357,8 +361,18 @@ RunService.RenderStepped:Connect(function(dt)
 
 	if state == Enums.State.Queued then
 		local elapsed = os.clock() - queueStart
+		-- Only quick play falls back to a bot, so only quick play has a deadline.
 		local botIn = (queueMode == Enums.Mode.Quick) and math.max(0, Tuning.BOT_AFTER - elapsed) or nil
-		ui:setQueueInfo(elapsed, botIn)
+		local note, title
+		if queueMode == Enums.Mode.Ranked then
+			title = "RANKED QUEUE"
+			note = string.format("Humans only — no bot fallback in ranked.  %ds", math.floor(elapsed))
+		elseif queueMode == Enums.Mode.Private then
+			title = "PRIVATE ROOM"
+			note = string.format("Waiting for someone else to stand on CREATE ROOM.  %ds",
+				math.floor(elapsed))
+		end
+		ui:setQueueInfo(elapsed, botIn, note, title)
 	end
 
 	if not sim then return end
@@ -374,6 +388,29 @@ RunService.RenderStepped:Connect(function(dt)
 
 	local elapsed = math.max(os.clock() - matchStart, 0.001)
 	hud:setStats(b.stats.sent / elapsed * 60, b.stats.pieces / elapsed, b.stats.sent, b.stats.lines)
+
+	-- Practice is a 40-line sprint, so it has a goal and a clock rather than
+	-- being a board that goes nowhere.
+	if matchInfo and matchInfo.practice and state == Enums.State.Playing then
+		hud.hint.Text = string.format("SPRINT  ·  %d / %d LINES  ·  %.1fs",
+			math.min(b.stats.lines, SPRINT_GOAL), SPRINT_GOAL, elapsed)
+		if b.stats.lines >= SPRINT_GOAL and not matchInfo.done then
+			matchInfo.done = true
+			if input then input:disable() end
+			Remotes.Practice:FireServer({
+				finished = true, mode = Enums.Mode.Sprint, stats = b.stats, time = elapsed,
+			})
+			SoundKit.play("go")
+			hud:setOverlay(string.format("%.2fs", elapsed), Theme.C.cy)
+			ui:showResults({
+				outcome = Enums.Result.Win, reason = "sprint", sprintTime = elapsed,
+				stats = { lines = b.stats.lines, sent = b.stats.sent, pieces = b.stats.pieces,
+					quads = b.stats.quads, apm = b.stats.pieces / elapsed * 60,
+					bestCombo = bestCombo },
+			}, false)
+			setState(Enums.State.Results)
+		end
+	end
 
 	-- Our own board goes to the opponent on a fixed budget, not every frame.
 	if matchInfo and matchInfo.networked and state == Enums.State.Playing then

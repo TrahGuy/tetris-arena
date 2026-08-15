@@ -59,12 +59,6 @@ function MatchmakingService.enqueue(player: Player, mode: string)
 	if MatchmakingService.matchFor(player) then return end -- already playing
 	if indexOf(player) then return end                     -- already queued
 
-	-- Private rooms are not a queue: they pair by invite, which needs a friend
-	-- flow that does not exist yet. Treated as quick play so the pad still works.
-	if mode == Enums.Mode.Private then
-		mode = Enums.Mode.Quick
-	end
-
 	table.insert(queue, { player = player, mode = mode, since = os.clock() })
 	Remotes.MatchUpdate:FireClient(player, { state = Enums.State.Queued })
 
@@ -124,7 +118,10 @@ function MatchmakingService.step(dt: number)
 		local entry = queue[i]
 		if not entry.player.Parent then
 			table.remove(queue, i)
-		elseif entry.mode ~= Enums.Mode.Ranked and now - entry.since >= Tuning.BOT_AFTER then
+		-- Quick play only. Ranked against a bot would be meaningless rating, and
+		-- a "private" room that silently seats a bot instead of the friend you
+		-- are waiting for is worse than an empty queue.
+		elseif entry.mode == Enums.Mode.Quick and now - entry.since >= Tuning.BOT_AFTER then
 			table.remove(queue, i)
 			start({ player = entry.player }, { bot = botFor(entry.player) }, entry.mode)
 		else

@@ -22,31 +22,59 @@ open at that path). Move it in here when convenient.
 | 2.5 — Shared foundations | done, 158 headless tests |
 | 3 — Solo Tetris | done |
 | 4 — Hold / Next / ghost / HUD | done |
-| 4.5 — Bot opponent | done — practice is one generic board, not Sprint/Blitz |
-| 5 — Queue and match flow | done |
+| 4.5 — Bot opponent + practice | done — practice is a 40-line Sprint |
+| 5 — Queue and match flow | done — quick / ranked / private are three real queues |
 | 6 — 1v1 garbage, opponent board, KO | done |
 | 6.5 — Authority hardening | done |
-| 7 — Juice | done — **no audio: no asset ids** |
-| 8 — Persistence, settings, stats | done |
-| 9 — Mobile touch / gamepad | not started (always was later) |
+| 7 — Juice and audio | done |
+| 8 — Persistence, settings, stats, Elo | done |
+| 9 — Mobile touch / gamepad | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
 to the same room, so `LobbyUi` covers what the world cannot show — searching,
 results, settings, help — and starting a match belongs to the pads.
 
+## Audio
+
+Every id in `Sound.luau` comes from a source Roblox licenses for use in
+experiences — **ProSoundEffects** (its official free SFX library) and
+**DistrokidOfficial** (its licensed music partner) — and each was loaded and
+checked for a real duration before being wired in. Most of what a free audio
+search returns is ripped from other games; several results say so in their own
+descriptions. None of that is here.
+
+They are general-purpose effects, not sounds authored for a block game, so each
+cue carries its own volume and pitch: the same one-second beep is a piece-move
+tick at 2.7x speed and 16% volume. Nothing was auditioned — they were chosen by
+description — so swap any that sound wrong. One line each.
+
 ## Known gaps
 
 | Gap | Why |
 | --- | --- |
-| **No audio at all** | `Sound.luau` has the mixer, volume settings, preloading and every cue call wired. It has no asset ids, because inventing them yields either a silent 404 or somebody else's sound in your game. Upload audio, paste ids into `IDS`, done. |
-| Practice is one mode | The pad gives a solo board. Sprint (40 lines) and Blitz (2 min) are not separate modes with their own goal and timer. |
-| CREATE ROOM falls through to quick play | A private match needs a friend-invite flow that does not exist. `MatchmakingService.enqueue` says so in a comment rather than silently misbehaving. |
-| RANKED queues like quick play | There is no rating system to rank against yet. |
+| No Blitz mode | Practice is a 40-line Sprint with a clock and a saved best. A 2-minute score attack would need its own scoring table, which does not exist. |
 | T-spins score zero | Detected and shown; `Attack.TSPIN_ENABLED` is false on purpose until the base game is proven. |
-| Museum skins are display-only | No cosmetic ownership system. |
+| Museum skins are display-only | No cosmetic ownership system. Board skins are the natural monetisation here and the renderer is built so a skin is a palette swap plus an effect hook — but nothing owns, sells or equips one. |
 | Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
-| Never tested with two humans | Studio-over-MCP can only drive one client. Tested extensively against the bot. |
+| Leaderboard is server-local | It ranks whoever is in this server. A global one needs OrderedDataStores and a moderation story for names. |
+| Never tested with two live humans | Studio over MCP drives one client. `Tests.twoPlayer` covers the path headlessly: two stand-in clients run their own boards and report locks exactly as `Main.client` does, with garbage and resync mirrored back the way the remotes deliver them. |
+
+## Tests
+
+179 assertions. **Run them in Play mode, from the Server datamodel:**
+
+```lua
+require(game.ServerScriptService.Services.Tests).run()
+```
+
+Running them from Edit over MCP is a trap — `require` caches per ModuleScript
+and the MCP command thread keeps its own cache, so an edited module silently
+re-runs as its stale self. Cloning `Shared` fixes it for modules the suite
+requires directly, but `BotService` and `MatchInstance` reach `Shared` by
+absolute path and still pick up the cached originals, so the two halves of a
+test end up running different versions of `Board`. Play mode builds a fresh
+datamodel, so everything there is current by construction.
 
 ## Lobby layout
 
