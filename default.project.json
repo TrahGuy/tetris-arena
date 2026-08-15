@@ -1,0 +1,28 @@
+{
+  "name": "BlockArena",
+  "globIgnorePaths": ["**/.gitkeep"],
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$ignoreUnknownInstances": true,
+      "Shared": { "$path": "src/ReplicatedStorage/Shared" },
+      "Remotes": { "$path": "src/ReplicatedStorage/Remotes" }
+    },
+
+    "ServerScriptService": {
+      "$ignoreUnknownInstances": true,
+      "Services": { "$path": "src/ServerScriptService/Services" }
+    },
+
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$ignoreUnknownInstances": true,
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "$ignoreUnknownInstances": true,
+        "Client": { "$path": "src/StarterPlayer/StarterPlayerScripts/Client" }
+      }
+    }
+  }
+}

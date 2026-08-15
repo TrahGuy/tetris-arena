@@ -141,9 +141,16 @@ It is a LocalScript on purpose. Every part it touches is anchored, so local
 CFrame writes never replicate — the whole lobby animates at zero server cost. Do
 not move this to the server.
 
-## Manual step outstanding
+## Lighting.Technology
 
-`Lighting.Technology` is not scriptable — it cannot even be read from the plugin
-context. Set it to **ShadowMap** by hand in the Properties panel. `Future` looks
-marginally better but costs a lot more, and the neon here comes from emissive
-material plus Bloom rather than from lighting technology.
+Not scriptable — it cannot even be *read* from the plugin context, so nothing in
+`build/` touches it. Check it by hand if you like (Explorer → Lighting →
+Properties, filter for `Technology`), but it is almost certainly already right:
+**ShadowMap is Studio's default** and this place came from the Baseplate
+template.
+
+It also barely matters here. Future's advantage over ShadowMap is per-pixel
+shadows from local lights, and every light in `05_lighting_rig` sets
+`Shadows = false` deliberately — 63 shadow-casting lights would be very
+expensive for no gain, since the look comes from emissive material and Bloom.
+Future would cost a lot and change almost nothing.
