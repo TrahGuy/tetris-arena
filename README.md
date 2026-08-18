@@ -32,6 +32,7 @@ open at that path). Move it in here when convenient.
 | 10 — Competitive hardening | done |
 | 11 — T-spin scoring and attack | done |
 | 12 — Global ranked leaderboard | done |
+| 13 — Skin ownership and equip | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -58,7 +59,7 @@ description — so swap any that sound wrong. One line each.
 | --- | --- |
 | No Blitz mode | Practice is a 40-line Sprint with a clock and a saved best. A 2-minute score attack would need its own scoring table, which does not exist. |
 | A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
-| Museum skins are display-only | No cosmetic ownership system. Board skins are the natural monetisation here and the renderer is built so a skin is a palette swap plus an effect hook — but nothing owns, sells or equips one. |
+| Skins have no way to be earned yet | Ownership, equipping and persistence are real; what is missing is any source of unlocks. Everything hangs off one server-only grant, so an achievement, the secret puzzle or a purchase all plug into the same call. No monetisation is implemented. |
 | Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
 | WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
 | Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
@@ -196,9 +197,72 @@ other servers see it within a refresh. The profile store deliberately has no
 session locking, so one account playing on two servers at once can still write
 the index twice — last writer wins, and the next join corrects it.
 
+## Skins
+
+Four board skins, defined once in `Shared/SkinData.luau`. The three unlockable
+ones are the museum's existing exhibits rather than inventions — the lobby has
+displayed GOLDEN T, DIAMOND I and GALAXY CUBE under glass since Phase 1 with
+nothing behind them.
+
+| id | name | owned | look |
+| --- | --- | --- | --- |
+| `classic` | CLASSIC | always | the shipping palette, unchanged |
+| `golden` | GOLDEN T | granted | warm metals on a bronze field |
+| `diamond` | DIAMOND I | granted | cut glass, cold light |
+| `galaxy` | GALAXY CUBE | granted | jewel tones on void |
+
+**Ids are stable, names are not.** A profile stores `ownedSkins` as a set of ids
+and `equippedSkin` as one id — never a palette, never a display name. Names get
+rewritten; entitlement stored in a label somebody is going to edit is
+entitlement waiting to be lost.
+
+**The server owns all of it.** The client may send `EquipSkin { skinId }`, which
+is a request: the server checks the skin exists, that the profile owns it, that
+the player is not mid-match, and that it is not already equipped before anything
+is written. There is no remote anywhere near granting — unlocks go through
+`StatsService.grantSkin(player, skinId)`, which is server-only and is the seam
+every future source of skins plugs into. A patched client can paint its own
+board any colour it likes; what it cannot do is make the server persist a skin
+it does not own.
+
+**Old profiles migrate on load and cannot be broken by the catalog changing.**
+The default is always owned, the equipped skin is always one the player owns,
+and ids that have left the catalog are quietly dropped from what is presented
+without being erased from the store. Retiring a cosmetic needs no migration
+script. On save, ownership is a **union** rather than last-write-wins: with no
+session lock two servers can hold one profile, and a grant made on one must not
+be taken back by the other saving afterward with an older view.
+
+**Accessibility wins.** Colourblind mode overrides skin piece colours outright
+rather than asking each skin for its own accessible variant — a cosmetic must
+never be able to switch accessibility off, and a per-skin high-contrast palette
+is a per-skin chance to get one wrong. The board, empty cells and ghost still
+follow the skin, so an equipped skin is still visibly equipped. The suite also
+checks every palette keeps the seven pieces far enough apart to tell at speed;
+it caught the first draft of DIAMOND I, where I and S were both pale and cool.
+
+**Cosmetics never touch the simulation.** `Board` takes no skin argument and
+there is nowhere to pass one. Cyan-for-yours and magenta-for-theirs stays fixed
+whatever is equipped, because which board is which is readability rather than
+decoration — and your screen renders both boards with *your* skin, so nobody's
+cosmetic state rides on the competitive wire.
+
+**The museum is the interface.** `MuseumService` tags each existing exhibit with
+its skin and drops an invisible interaction pad in front of it, so the lobby's
+existing dwell-to-activate pattern picks them up like any other station — which
+is positional, so it works on keyboard, gamepad and touch without a mouse. The
+prompt reads LOCKED, OWNED or EQUIPPED. Standing on an owned exhibit equips it.
+
+For testing, a Studio-only grant path sits on a ServerStorage attribute, which
+no client can write or even see:
+
+```lua
+game.ServerStorage.Debug:SetAttribute("GrantSkin", "12345678:golden")
+```
+
 ## Tests
 
-381 assertions. **Run them in Play mode, from the Server datamodel:**
+473 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()

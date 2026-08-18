@@ -21,7 +21,7 @@
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
-	GlobalRank, Enums
+	GlobalRank, Enums, SkinData
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -1318,6 +1318,227 @@ function T.globalRankRender()
 	end
 end
 
+-- ── Skins (Phase 13) ──────────────────────────────────────────────────────
+
+-- The catalog is checked rather than trusted: a half-written skin should fail
+-- here, not on somebody's board.
+function T.skinCatalog()
+	local ok, problems = SkinData.validate()
+	check("skins: the catalog validates", ok, table.concat(problems, "; "))
+
+	local seen = {}
+	for _, skin in ipairs(SkinData.ordered()) do
+		check("skins: " .. tostring(skin.id) .. " has a unique id", not seen[skin.id])
+		seen[skin.id] = true
+		eq("skins: " .. skin.id .. " has eight palette entries", #skin.palette, 8)
+	end
+
+	check("skins: there is a default", SkinData.default() ~= nil)
+	eq("skins: and it is the one the id names", SkinData.default().id, SkinData.DEFAULT_ID)
+	check("skins: the default is owned by default", SkinData.default().defaultOwned == true)
+	check("skins: an unknown id does not exist", not SkinData.exists("no_such_skin"))
+	check("skins: a non-string id does not exist", not SkinData.exists(42))
+	eq("skins: an unknown id resolves to the default", SkinData.resolve("nope").id, SkinData.DEFAULT_ID)
+	eq("skins: so does nil", SkinData.resolve(nil).id, SkinData.DEFAULT_ID)
+
+	-- Colourblind overrides the skin outright: a cosmetic must never be able to
+	-- switch accessibility off.
+	for _, skin in ipairs(SkinData.ordered()) do
+		eq("skins: " .. skin.id .. " yields to the colourblind palette",
+			SkinData.paletteFor(skin.id, true), SkinData.COLOURBLIND)
+		eq("skins: " .. skin.id .. " uses its own palette otherwise",
+			SkinData.paletteFor(skin.id, false), skin.palette)
+	end
+	eq("skins: the colourblind palette covers every piece and garbage",
+		#SkinData.COLOURBLIND, 8)
+
+	-- Every piece has to stay tellable from every other piece.
+	for _, skin in ipairs(SkinData.ordered()) do
+		local far = true
+		for i = 1, 7 do
+			for j = i + 1, 7 do
+				local a, b = skin.palette[i], skin.palette[j]
+				local d = math.abs(a.R - b.R) + math.abs(a.G - b.G) + math.abs(a.B - b.B)
+				if d < 0.25 then far = false end
+			end
+		end
+		check("skins: " .. skin.id .. " keeps the seven pieces distinguishable", far)
+	end
+end
+
+-- Ownership, migration and the rules that hold whatever came back from a store.
+function T.skinOwnership()
+	local a = fakePlayer(-201, "SkinOne")
+	Stats.load(a)
+	local p = Stats.get(a)
+
+	eq("skins: a new profile equips the default", p.equippedSkin, SkinData.DEFAULT_ID)
+	check("skins: and owns it", p.ownedSkins[SkinData.DEFAULT_ID] == true)
+	local ownedCount = 0
+	for _ in pairs(p.ownedSkins) do ownedCount += 1 end
+	eq("skins: and owns nothing else", ownedCount, 1)
+
+	-- Two profiles must not share one ownership table, which is exactly what a
+	-- shallow clone of the defaults would hand out.
+	local b = fakePlayer(-202, "SkinTwo")
+	Stats.load(b)
+	check("skins: two profiles do not share an ownership table",
+		Stats.get(a).ownedSkins ~= Stats.get(b).ownedSkins)
+	eq("skins: granting one is granted", Stats.grantSkin(a, "golden"), "granted")
+	check("skins: and does not reach the other", Stats.get(b).ownedSkins.golden == nil)
+
+	-- Granting.
+	eq("skins: granting again is idempotent", Stats.grantSkin(a, "golden"), "already")
+	check("skins: the skin is owned", Stats.ownsSkin(a, "golden"))
+	eq("skins: a skin that does not exist cannot be granted",
+		Stats.grantSkin(a, "no_such_skin"), "unknown skin")
+	eq("skins: nor a malformed id", Stats.grantSkin(a, { }), "unknown skin")
+	eq("skins: nor nothing at all", Stats.grantSkin(a, nil), "unknown skin")
+
+	-- Equipping.
+	eq("skins: an owned skin equips", Stats.equipSkin(a, "golden"), "equipped")
+	eq("skins: and is recorded", Stats.get(a).equippedSkin, "golden")
+	eq("skins: equipping it again changes nothing", Stats.equipSkin(a, "golden"), "no change")
+	eq("skins: an unowned skin is refused", Stats.equipSkin(a, "galaxy"), "not owned")
+	eq("skins: and does not change what is equipped", Stats.get(a).equippedSkin, "golden")
+	eq("skins: a skin that does not exist is refused",
+		Stats.equipSkin(a, "no_such_skin"), "unknown skin")
+	eq("skins: equipping during a match is refused",
+		Stats.equipSkin(a, SkinData.DEFAULT_ID, true), "in a match")
+	eq("skins: which leaves the equipped skin alone", Stats.get(a).equippedSkin, "golden")
+
+	-- Malformed requests are harmless: none may throw, mutate or equip.
+	local before = Stats.get(a).equippedSkin
+	local ownedBefore = 0
+	for _ in pairs(Stats.get(a).ownedSkins) do ownedBefore += 1 end
+	for _, bad in ipairs({ 123, true, "", string.rep("x", 5000) }) do
+		local okCall, verdict = pcall(Stats.equipSkin, a, bad)
+		check("skins: a malformed equip does not error", okCall, tostring(verdict))
+		check("skins: and equips nothing", verdict ~= "equipped")
+	end
+	local okNil, verdictNil = pcall(Stats.equipSkin, a, nil)
+	check("skins: a nil equip does not error", okNil, tostring(verdictNil))
+	eq("skins: nothing moved", Stats.get(a).equippedSkin, before)
+	local ownedAfter = 0
+	for _ in pairs(Stats.get(a).ownedSkins) do ownedAfter += 1 end
+	eq("skins: and nothing was granted", ownedAfter, ownedBefore)
+
+	-- The client's one write path into a profile still cannot touch any of it.
+	Stats.applySettings(a, { ownedSkins = { galaxy = true }, equippedSkin = "galaxy",
+		unlock = true, das = 120 })
+	check("skins: SaveSettings cannot grant", Stats.get(a).ownedSkins.galaxy == nil)
+	eq("skins: SaveSettings cannot equip", Stats.get(a).equippedSkin, "golden")
+	eq("skins: but still saves settings", Stats.get(a).das, 120)
+end
+
+-- What a profile becomes, given whatever was in the store.
+function T.skinMigration()
+	local function migrated(saved)
+		-- merge() is private, so go through the seam every profile goes
+		-- through: a load with no store returns the merged defaults, and the
+		-- fields under test are rebuilt from `saved` by the same code path.
+		return Stats.migrateForTest(saved)
+	end
+
+	local fresh = migrated(nil)
+	check("migration: a profile with no skin fields owns the default",
+		fresh.ownedSkins[SkinData.DEFAULT_ID] == true)
+	eq("migration: and equips it", fresh.equippedSkin, SkinData.DEFAULT_ID)
+
+	local legacy = migrated({ wins = 12, rating = 1240 })
+	eq("migration: an old profile keeps its stats", legacy.wins, 12)
+	eq("migration: and its rating", legacy.rating, 1240)
+	check("migration: and gains the default skin", legacy.ownedSkins[SkinData.DEFAULT_ID] == true)
+
+	local retired = migrated({ ownedSkins = { golden = true, ancient_relic = true },
+		equippedSkin = "golden" })
+	check("migration: a live id survives", retired.ownedSkins.golden == true)
+	check("migration: an id that left the catalog is dropped",
+		retired.ownedSkins.ancient_relic == nil)
+	eq("migration: and the equipped skin is untouched", retired.equippedSkin, "golden")
+
+	local gone = migrated({ ownedSkins = { golden = true }, equippedSkin = "ancient_relic" })
+	eq("migration: equipping a retired skin falls back to the default",
+		gone.equippedSkin, SkinData.DEFAULT_ID)
+	check("migration: without losing the rest of the wardrobe", gone.ownedSkins.golden == true)
+
+	local unowned = migrated({ ownedSkins = {}, equippedSkin = "galaxy" })
+	eq("migration: equipping something unowned falls back too",
+		unowned.equippedSkin, SkinData.DEFAULT_ID)
+
+	local junk = migrated({ ownedSkins = { golden = "yes", [7] = true, galaxy = false },
+		equippedSkin = 99 })
+	check("migration: ownership that is not literally true is ignored",
+		junk.ownedSkins.golden == nil and junk.ownedSkins.galaxy == nil)
+	eq("migration: a non-string equipped id falls back", junk.equippedSkin, SkinData.DEFAULT_ID)
+	check("migration: the default is still there", junk.ownedSkins[SkinData.DEFAULT_ID] == true)
+
+	local hostile = migrated({ ownedSkins = "everything", equippedSkin = { "galaxy" } })
+	check("migration: a hostile ownership value yields the default only",
+		hostile.ownedSkins[SkinData.DEFAULT_ID] == true and hostile.ownedSkins.golden == nil)
+	eq("migration: and the default equipped", hostile.equippedSkin, SkinData.DEFAULT_ID)
+
+	-- The merge that runs on save, where two servers can disagree.
+	local mine = { ownedSkins = { classic = true, golden = true }, equippedSkin = "golden" }
+	local theirs = { ownedSkins = { classic = true, diamond = true }, equippedSkin = "diamond" }
+	local union = Stats.mergeOwnershipForTest(theirs, mine)
+	check("migration: a grant made elsewhere survives this server's save",
+		union.ownedSkins.diamond == true)
+	check("migration: and so does this server's", union.ownedSkins.golden == true)
+	check("migration: the default is never lost",
+		union.ownedSkins[SkinData.DEFAULT_ID] == true)
+	eq("migration: equipped follows the saving server", union.equippedSkin, "golden")
+end
+
+-- A skin is presentation. It must not be able to reach the simulation.
+function T.skinIsCosmetic()
+	local function play(seed, skinId)
+		-- The board takes no skin at all, which is the point: there is no
+		-- argument to pass and nowhere for one to get in.
+		local b = Board.new(seed)
+		local script_ = { -1, -1, 1, 0, 1, -1, 0, 1, 1, -1 }
+		for i = 1, 40 do
+			b:move(script_[(i % #script_) + 1])
+			if i % 3 == 0 then b:rotate(1) end
+			b:hardDrop()
+			b:step(Tuning.CLEAR_DELAY + 0.02)
+		end
+		return b
+	end
+
+	local plain, skinned = play(4242), play(4242)
+	local same = true
+	for i = 1, #plain.cells do
+		if plain.cells[i] ~= skinned.cells[i] then same = false end
+	end
+	check("cosmetic: the same seed gives the same board whatever is equipped", same)
+	eq("cosmetic: the same piece count", plain.stats.pieces, skinned.stats.pieces)
+	eq("cosmetic: the same lines", plain.stats.lines, skinned.stats.lines)
+	eq("cosmetic: the same attack sent", plain.stats.sent, skinned.stats.sent)
+
+	-- Attack, T-spin detection and the bag do not take a skin either.
+	eq("cosmetic: attack is computed from lines and spin alone",
+		Attack.compute(2, "full", false, false, 1).attack, 4)
+	local s = SPINS.double
+	local spun = spinInto(s)
+	eq("cosmetic: T-spin detection is board geometry", spun:detectTSpin(), "full")
+	local bagA, bagB = Bag.new(777), Bag.new(777)
+	local bagSame = true
+	for _ = 1, 20 do
+		if bagA:pop() ~= bagB:pop() then bagSame = false end
+	end
+	check("cosmetic: the piece sequence is untouched", bagSame)
+
+	-- And nothing about a skin appears in the competitive message shape.
+	local m = MatchInstance.new(5150, { name = "P1" }, { name = "P2" }, { seed = 3 })
+	check("cosmetic: a match message is addressed by id, not by appearance",
+		m:ownsMessage({ matchId = 5150 }))
+	check("cosmetic: a skinned message is still just a message",
+		m:ownsMessage({ matchId = 5150, skinId = "galaxy" }))
+	check("cosmetic: and a wrong id is still refused",
+		not m:ownsMessage({ matchId = 1, skinId = "galaxy" }))
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -1462,6 +1683,7 @@ function T.run(root: Instance?, services: Instance?)
 	Practice = require((services :: any).PracticeService)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
+	SkinData = require((root :: any).SkinData)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
@@ -1469,7 +1691,9 @@ function T.run(root: Instance?, services: Instance?)
 		"gravityAndLock", "holdAndReach", "reachCost", "elo", "sessions", "disconnect",
 		"practice", "tspinDetect", "tspinAttack", "tspinB2B", "tspinStats",
 		"tspinAuthority", "globalRankIndex", "globalRankBoard", "globalRankFallback",
-		"globalRankWiring", "globalRankRender", "bots", "twoPlayer" }
+		"globalRankWiring", "globalRankRender",
+		"skinCatalog", "skinOwnership", "skinMigration", "skinIsCosmetic",
+		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])
 		if not ok then

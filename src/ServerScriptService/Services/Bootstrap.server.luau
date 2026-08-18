@@ -15,8 +15,19 @@ local RateLimiter = require(Services.RateLimiter)
 local Matchmaking = require(Services.MatchmakingService)
 local Stats = require(Services.StatsService)
 local Practice = require(Services.PracticeService)
+local Museum = require(Services.MuseumService)
 
 Matchmaking.setStatsService(Stats)
+
+-- Tags the museum's existing exhibits with the skins they represent and gives
+-- each one an interaction pad. Idempotent, and a no-op if the lobby is absent.
+do
+	local wired, missing = Museum.wire()
+	if missing > 0 then
+		warn(("[Museum] %d catalog skins have no exhibit in the world"):format(missing))
+	end
+	print(("[BlockArena] museum: %d exhibits wired"):format(wired))
+end
 
 -- Live-tunable constants land on a folder so they can be adjusted from the
 -- command bar mid-session; module tables read from outside are a different copy.
@@ -58,6 +69,14 @@ end)
 Remotes.SaveSettings.OnServerEvent:Connect(function(player, msg)
 	if not limits.ui:allow(player) then return end
 	Stats.applySettings(player, msg)
+end)
+
+-- Equipping is a UI action: rate limited like the rest, and the payload carries
+-- one id. Ownership is never read from the message — Stats decides.
+Remotes.EquipSkin.OnServerEvent:Connect(function(player, msg)
+	if not limits.ui:allow(player) then return end
+	if type(msg) ~= "table" then return end
+	Stats.equipSkin(player, msg.skinId, Matchmaking.matchFor(player) ~= nil)
 end)
 
 -- Practice runs on the client, but the result is not taken on trust: it goes
@@ -155,6 +174,33 @@ task.spawn(function()
 		debugFolder:SetAttribute("GlobalRankLastError", g.lastError)
 	end
 end)
+
+-- Development grant path, Studio only.
+--
+-- Unlocks have no source yet — achievements, the secret puzzle and a shop are
+-- all later phases — so there has to be some way to put a skin on an account
+-- and see the museum change. This is an attribute on ServerStorage, which a
+-- client cannot write and cannot even see, driven from the command bar:
+--
+--   game.ServerStorage.Debug:SetAttribute("GrantSkin", "12345678:golden")
+--
+-- Gated on IsStudio so it does not exist in a published place at all. There is
+-- deliberately no remote anywhere near StatsService.grantSkin.
+if RunService:IsStudio() then
+	debugFolder:GetAttributeChangedSignal("GrantSkin"):Connect(function()
+		local request = debugFolder:GetAttribute("GrantSkin")
+		if type(request) ~= "string" or request == "" then return end
+		local idText, skinId = request:match("^(-?%d+):(.+)$")
+		local userId = tonumber(idText)
+		local player = userId and Players:GetPlayerByUserId(userId)
+		if not player then
+			debugFolder:SetAttribute("GrantSkinResult", "no such player: " .. request)
+			return
+		end
+		debugFolder:SetAttribute("GrantSkinResult",
+			("%s %s -> %s"):format(player.Name, tostring(skinId), Stats.grantSkin(player, skinId)))
+	end)
+end
 
 game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do

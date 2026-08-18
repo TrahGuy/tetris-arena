@@ -12,6 +12,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Pieces = require(Shared.Pieces)
+local SkinData = require(Shared.SkinData)
 local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 
@@ -26,16 +27,23 @@ function BoardRenderer.new(parent: Instance, opts: any?)
 	local self = setmetatable({
 		w = w,
 		h = h,
-		palette = opts.colourblind and Pieces.COLOURS_HC or Pieces.COLOURS,
+		skinId = opts.skinId or SkinData.DEFAULT_ID,
+		colourblind = opts.colourblind == true,
 		shells = table.create(w * h),
 		cores = table.create(w * h),
 		last = table.create(w * h, -1),
 		gutter = opts.gutter or 2,
+		-- The board frame's own colours are the skin's too, but this renderer
+		-- may be a small opponent preview with a caller-chosen accent, so that
+		-- one stays overridable.
+		accentOverride = opts.accent,
 	}, BoardRenderer)
+	self.skin = SkinData.resolve(self.skinId)
+	self.palette = SkinData.paletteFor(self.skinId, self.colourblind)
 
 	local root = Instance.new("Frame")
 	root.Name = "Board"
-	root.BackgroundColor3 = Theme.C.board
+	root.BackgroundColor3 = self.skin.board
 	root.BorderSizePixel = 0
 	root.Size = opts.size or UDim2.fromScale(1, 1)
 	root.Position = opts.position or UDim2.fromScale(0, 0)
@@ -49,7 +57,7 @@ function BoardRenderer.new(parent: Instance, opts: any?)
 		ar.Parent = root
 	end
 	Theme.corner(root, 6)
-	Theme.stroke(root, opts.accent or Theme.C.line, opts.strokeThickness or 2, 0.2)
+	self.stroke = Theme.stroke(root, opts.accent or self.skin.accent, opts.strokeThickness or 2, 0.2)
 
 	-- Absolute-scale placement rather than a UIGridLayout: a grid layout reflows
 	-- on every change and buys nothing for a fixed board.
@@ -60,7 +68,7 @@ function BoardRenderer.new(parent: Instance, opts: any?)
 			local shell = Instance.new("Frame")
 			shell.Name = "c"
 			shell.BorderSizePixel = 0
-			shell.BackgroundColor3 = Theme.C.cellEmpty
+			shell.BackgroundColor3 = self.skin.cellEmpty
 			-- row 1 is the bottom of the board, so the top of the screen is row h.
 			shell.Position = UDim2.new((col - 1) / w, g, (h - row) / h, g)
 			shell.Size = UDim2.new(1 / w, -g * 2, 1 / h, -g * 2)
@@ -81,10 +89,31 @@ function BoardRenderer.new(parent: Instance, opts: any?)
 	return self
 end
 
-function BoardRenderer:setPalette(colourblind: boolean)
-	self.palette = colourblind and Pieces.COLOURS_HC or Pieces.COLOURS
+-- Recomputes everything the skin decides and forces a full repaint.
+--
+-- Cheap on purpose: it swaps a cached palette table and a handful of scalars,
+-- then invalidates the diff so the next paint rewrites every cell once. No
+-- per-cell object is created, destroyed or tweened — the cell pool built above
+-- is the same pool for every skin.
+function BoardRenderer:_apply()
+	self.skin = SkinData.resolve(self.skinId)
+	self.palette = SkinData.paletteFor(self.skinId, self.colourblind)
+	self.root.BackgroundColor3 = self.skin.board
+	if self.stroke then
+		self.stroke.Color = self.accentOverride or self.skin.accent
+	end
 	table.clear(self.last)
 	for i = 1, self.w * self.h do self.last[i] = -1 end
+end
+
+function BoardRenderer:setSkin(skinId: string?)
+	self.skinId = SkinData.exists(skinId) and skinId or SkinData.DEFAULT_ID
+	self:_apply()
+end
+
+function BoardRenderer:setPalette(colourblind: boolean)
+	self.colourblind = colourblind == true
+	self:_apply()
 end
 
 -- Builds the display array: locked cells, then ghost, then the live piece on top.
@@ -129,17 +158,17 @@ function BoardRenderer:paint(disp: { number })
 			last[i] = v
 			local shell, core = self.shells[i], self.cores[i]
 			if v == 0 then
-				shell.BackgroundColor3 = Theme.C.cellEmpty
+				shell.BackgroundColor3 = self.skin.cellEmpty
 				shell.BackgroundTransparency = 0
 				core.BackgroundTransparency = 1
 			elseif v >= GHOST then
 				local colour = self.palette[v - GHOST] or Theme.C.muted
 				shell.BackgroundColor3 = colour
-				shell.BackgroundTransparency = 0.82
+				shell.BackgroundTransparency = self.skin.ghostTransparency
 				core.BackgroundTransparency = 1
 			else
 				local colour = self.palette[v] or Theme.C.muted
-				shell.BackgroundColor3 = colour:Lerp(Color3.new(0, 0, 0), 0.5)
+				shell.BackgroundColor3 = colour:Lerp(Color3.new(0, 0, 0), self.skin.shellDarken)
 				shell.BackgroundTransparency = 0
 				core.BackgroundColor3 = colour
 				core.BackgroundTransparency = 0

@@ -10,6 +10,7 @@ local TweenService = game:GetService("TweenService")
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Pieces = require(Shared.Pieces)
+local SkinData = require(Shared.SkinData)
 local Tuning = require(Shared.Tuning)
 local BoardRenderer = require(script.Parent.BoardRenderer)
 
@@ -68,8 +69,13 @@ end
 
 function Hud.new(parent: Instance, opts: any?)
 	opts = opts or {}
-	local palette = opts.colourblind and Pieces.COLOURS_HC or Pieces.COLOURS
-	local self = setmetatable({ palette = palette, nextCells = {} }, Hud)
+	local skinId = opts.skinId or SkinData.DEFAULT_ID
+	local self = setmetatable({
+		skinId = skinId,
+		colourblind = opts.colourblind == true,
+		palette = SkinData.paletteFor(skinId, opts.colourblind),
+		nextCells = {},
+	}, Hud)
 
 	local root = Instance.new("Frame")
 	root.Name = "Match"
@@ -141,8 +147,11 @@ function Hud.new(parent: Instance, opts: any?)
 
 	self.renderer = BoardRenderer.new(boardHolder, {
 		aspect = false,
+		-- Cyan for yours, magenta for theirs, whatever skin is equipped. Which
+		-- board is which is readability, not decoration.
 		accent = Theme.C.cy,
 		colourblind = opts.colourblind,
+		skinId = skinId,
 	})
 
 	-- Banner for combo / back-to-back / spin callouts.
@@ -198,6 +207,11 @@ function Hud.new(parent: Instance, opts: any?)
 		gutter = 1,
 		strokeThickness = 1,
 		colourblind = opts.colourblind,
+		-- Your skin, on your screen, for both boards. The opponent's
+		-- entitlements are not replicated: it would put cosmetic state on the
+		-- competitive wire to answer a question nobody asked, and it would let
+		-- their choice decide how readable your view of them is.
+		skinId = skinId,
 	})
 	self.oppStatus = Theme.label(opp, "", {
 		TextColor3 = Theme.C.muted, TextSize = 14,
@@ -233,6 +247,21 @@ function Hud.new(parent: Instance, opts: any?)
 		Position = UDim2.fromOffset(0, 8), Size = UDim2.fromOffset(total, 18),
 	})
 	return self
+end
+
+-- One place that knows both boards and the previews share a palette.
+function Hud:setSkin(skinId: string?)
+	self.skinId = SkinData.exists(skinId) and skinId or SkinData.DEFAULT_ID
+	self.palette = SkinData.paletteFor(self.skinId, self.colourblind)
+	self.renderer:setSkin(self.skinId)
+	self.oppRenderer:setSkin(self.skinId)
+end
+
+function Hud:setColourblind(on: boolean)
+	self.colourblind = on == true
+	self.palette = SkinData.paletteFor(self.skinId, self.colourblind)
+	self.renderer:setPalette(self.colourblind)
+	self.oppRenderer:setPalette(self.colourblind)
 end
 
 function Hud:show(on: boolean)

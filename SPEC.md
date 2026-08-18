@@ -74,6 +74,15 @@ Ranked index: `BlockArenaRankedRating_v1` (OrderedDataStore), key `tostring(User
 Eligibility: `rankedWins + rankedLosses + rankedDraws > 0`. Names resolved at display time from UserId; never stored.
 Global top 5 cached, refreshed every 60s (15s floor when a ranked result requests it). Read failure keeps the last good page; no good page falls back to a panel titled SERVER RANK.
 
+## Skins
+
+Catalog: `Shared/SkinData.luau`. Ids are stable and machine-readable; profiles store ids only, never palettes or names.
+Profile: `ownedSkins` (set of ids), `equippedSkin` (one id). Default `classic` is always owned and never removable.
+Server validates every equip against profile ownership; there is no grant remote — `StatsService.grantSkin` is server-only.
+Ownership merges as a UNION on save (no session lock). Equipped is last-write-wins.
+Retired ids are dropped from presentation, never migrated; an invalid equipped id falls back to the default.
+Colourblind mode overrides skin piece colours. Cosmetics never reach Board, Attack, the bag or the network contract.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

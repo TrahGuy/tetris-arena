@@ -20,6 +20,9 @@ local RELIABLE = {
 	"Profile",       -- s->c  { wins, losses, settings, ... }
 	"SaveSettings",  -- c->s  { das, arr, volume, colourblind }
 	"Leaderboard",   -- s->c  { world = {...}, streak = {...}, scores = {...} }
+	-- c->s { skinId }. A request, never a claim: ownership lives in the profile
+	-- and is decided server side. There is deliberately no remote that grants.
+	"EquipSkin",
 }
 
 local UNRELIABLE = {

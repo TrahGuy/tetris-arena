@@ -19,6 +19,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Enums = require(Shared.Enums)
 local Remotes = require(Shared.Remotes)
+local SkinData = require(Shared.SkinData)
 local GlobalRank = require(script.Parent.GlobalRank)
 
 local StatsService = {}
@@ -43,6 +44,13 @@ local DEFAULT = {
 	-- which is exactly the account the global board has to decide about.
 	rankedDraws = 0,
 	das = 133, arr = 0, music = 60, sfx = 80, colourblind = false,
+	-- Cosmetics. Ids only, never skin definitions: the catalog lives in
+	-- SkinData and a profile that stored palettes would be a second, stale
+	-- copy of it. ownedSkins is rebuilt per profile by mergeSkins below --
+	-- DEFAULT is shallow-cloned, so a table left here would be SHARED by
+	-- every player on the server.
+	ownedSkins = {},
+	equippedSkin = SkinData.DEFAULT_ID,
 }
 
 -- Elo. The RANKED pad was queuing exactly like quick play, which made the label
@@ -148,6 +156,61 @@ local function key(userId: number): string
 	return "u_" .. userId
 end
 
+-- Entitlement, rebuilt from what was saved rather than adopted from it.
+--
+-- Four things have to hold no matter what came back from the store, including
+-- nothing at all: the default is owned, the equipped skin is one the player
+-- owns, ids that are no longer in the catalog are quietly dropped, and the
+-- table is this profile's own rather than one shared with every other player on
+-- the server — which is what a shallow clone of DEFAULT would hand out.
+--
+-- Retiring a cosmetic must never need a migration script. An id that has left
+-- the catalog simply stops being presented; if it comes back, so does the
+-- ownership, because dropping it here does not erase it from the store.
+local function mergeSkins(p: any, saved: any?)
+	local owned = {}
+	if type(saved) == "table" and type(saved.ownedSkins) == "table" then
+		for id, value in pairs(saved.ownedSkins) do
+			if value == true and SkinData.exists(id) then
+				owned[id] = true
+			end
+		end
+	end
+	owned[SkinData.DEFAULT_ID] = true
+	p.ownedSkins = owned
+
+	local equipped = type(saved) == "table" and saved.equippedSkin or nil
+	if type(equipped) == "string" and owned[equipped] then
+		p.equippedSkin = equipped
+	else
+		p.equippedSkin = SkinData.DEFAULT_ID
+	end
+end
+
+-- Ownership is a UNION on save, not a last-write-wins table.
+--
+-- There is no session lock, so two servers can hold the same profile. If one
+-- grants a skin and the other saves afterward with an older view, writing this
+-- server's table wholesale would take the grant back — and an entitlement that
+-- silently disappears is the worst kind of bug to be on the receiving end of. A
+-- union can only ever be too generous, and it can only be generous about skins
+-- some server actually granted, because nothing else ever reaches this table.
+--
+-- Equipped is a preference, so it follows the settings rule: last writer wins.
+local function unionOwnership(merged: any, profile: any): any
+	local owned = type(merged.ownedSkins) == "table" and merged.ownedSkins or {}
+	if type(profile.ownedSkins) == "table" then
+		for id, value in pairs(profile.ownedSkins) do
+			if value == true then owned[id] = true end
+		end
+	end
+	owned[SkinData.DEFAULT_ID] = true
+	merged.ownedSkins = owned
+	merged.equippedSkin = owned[profile.equippedSkin] and profile.equippedSkin
+		or SkinData.DEFAULT_ID
+	return merged
+end
+
 local function merge(saved: any?): any
 	local p = table.clone(DEFAULT)
 	if type(saved) == "table" then
@@ -157,6 +220,7 @@ local function merge(saved: any?): any
 			end
 		end
 	end
+	mergeSkins(p, saved)
 	return p
 end
 
@@ -222,6 +286,8 @@ function StatsService.save(player: Player)
 			for _, k in ipairs({ "das", "arr", "music", "sfx", "colourblind" }) do
 				merged[k] = profile[k]
 			end
+
+			unionOwnership(merged, profile)
 			return merged
 		end)
 	end)
@@ -231,6 +297,71 @@ function StatsService.release(player: Player)
 	StatsService.save(player)
 	profiles[player.UserId] = nil
 	dirty[player.UserId] = nil
+end
+
+-- ── Skins ─────────────────────────────────────────────────────────────────
+
+-- Server-only. There is no remote that reaches this, and there must never be
+-- one: a client that can call grant is a client that owns the catalog.
+--
+-- This is the seam every future unlock hangs off — achievements, the secret
+-- puzzle, an event, and eventually a purchase. Granting twice is harmless, so
+-- callers never have to check first.
+--
+-- Returns one of "granted", "already", "unknown skin", "no profile".
+function StatsService.grantSkin(player: Player, skinId: any): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	if not SkinData.exists(skinId) then return "unknown skin" end
+	if p.ownedSkins[skinId] then return "already" end
+	p.ownedSkins[skinId] = true
+	dirty[player.UserId] = true
+	if player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return "granted"
+end
+
+-- The two seams the suite needs: what a stored profile becomes on load, and
+-- what two servers' ownership becomes on save. Both are the real functions,
+-- exposed rather than reimplemented, so a test cannot pass against a copy.
+function StatsService.migrateForTest(saved: any?): any
+	return merge(saved)
+end
+
+function StatsService.mergeOwnershipForTest(stored: any, profile: any): any
+	return unionOwnership(merge(stored), profile)
+end
+
+function StatsService.ownsSkin(player: Player, skinId: any): boolean
+	local p = profiles[player.UserId]
+	return (p and type(skinId) == "string" and p.ownedSkins[skinId] == true) or false
+end
+
+-- The client asks; this decides. A request names a skin and nothing else — the
+-- server never takes ownership, or an equipped state, off the wire.
+--
+-- Returns one of "equipped", "no change", "not owned", "unknown skin",
+-- "no profile", "in a match".
+function StatsService.equipSkin(player: Player, skinId: any, inMatch: boolean?): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	if not SkinData.exists(skinId) then return "unknown skin" end
+	if not p.ownedSkins[skinId] then return "not owned" end
+	-- Cosmetics change between matches, not during one. The board is the thing
+	-- the player is reading, and repainting it mid-stack is a distraction at
+	-- best; keeping the renderer's palette fixed for the length of a match also
+	-- means there is no visual state to get wrong when a resync arrives.
+	if inMatch then return "in a match" end
+	-- Spamming equip must not spam persistence. An unchanged choice is a
+	-- success that writes nothing and does not mark the profile dirty.
+	if p.equippedSkin == skinId then return "no change" end
+	p.equippedSkin = skinId
+	dirty[player.UserId] = true
+	if player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return "equipped"
 end
 
 function StatsService.applySettings(player: Player, s: any)

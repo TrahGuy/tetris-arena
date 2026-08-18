@@ -23,9 +23,14 @@ local LABELS = {
 	[Enums.Mode.Emote] = { "EMOTE ZONE", "Dance / idle rewards" },
 }
 
-function PadController.new(onActivate: (string) -> ())
+-- `describe` may override the prompt for a pad whose label is not fixed — the
+-- museum's, which has to say what the skin is and whether you own it. It gets
+-- the pad record and returns title, subtitle, or nothing to fall back to
+-- LABELS above.
+function PadController.new(onActivate: (string, any) -> (), describe: ((any) -> (string?, string?))?)
 	local self = setmetatable({
 		onActivate = onActivate,
+		describe = describe,
 		pads = {},
 		current = nil,
 		dwell = 0,
@@ -33,7 +38,22 @@ function PadController.new(onActivate: (string) -> ())
 		fired = false,
 	}, PadController)
 	self:rescan()
+	self:_watch()
 	return self
+end
+
+-- Pads can arrive after this controller does. The museum's are built by the
+-- server at boot and replicate whenever they replicate, so scanning once at
+-- startup is a race the client loses about as often as it wins — and losing it
+-- means an exhibit that silently does nothing forever.
+function PadController:_watch()
+	local lobby = workspace:FindFirstChild("Lobby")
+	if not lobby then return end
+	self.watcher = lobby.DescendantAdded:Connect(function(d)
+		if d:IsA("BasePart") and d:GetAttribute("PadMode") then
+			self:rescan()
+		end
+	end)
 end
 
 function PadController:rescan()
@@ -46,6 +66,8 @@ function PadController:rescan()
 				part = d,
 				mode = d:GetAttribute("PadMode"),
 				accent = d:GetAttribute("Accent"),
+				-- Set by MuseumService on the museum pads; nil everywhere else.
+				skinId = d:GetAttribute("SkinId"),
 			})
 		end
 	end
@@ -94,12 +116,19 @@ function PadController:update(dt: number): (string?, string?, number?)
 	end
 	self.dwell = math.min(DWELL, self.dwell + dt)
 
-	local label = LABELS[pad.mode] or { string.upper(tostring(pad.mode)), "" }
+	local title, sub
+	if self.describe then
+		title, sub = self.describe(pad)
+	end
+	if not title then
+		local label = LABELS[pad.mode] or { string.upper(tostring(pad.mode)), "" }
+		title, sub = label[1], label[2]
+	end
 	if self.dwell >= DWELL and not self.fired then
 		self.fired = true
-		self.onActivate(pad.mode)
+		self.onActivate(pad.mode, pad)
 	end
-	return label[1], label[2], self.dwell / DWELL
+	return title, sub, self.dwell / DWELL
 end
 
 return PadController

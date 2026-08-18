@@ -13,6 +13,7 @@ local Attack = require(Shared.Attack)
 local Bag = require(Shared.Bag)
 local Net = require(Shared.Net)
 local Remotes = require(Shared.Remotes)
+local SkinData = require(Shared.SkinData)
 
 local Sim = require(script.Parent.Sim)
 local Hud = require(script.Parent.Hud)
@@ -62,6 +63,9 @@ local queueStart, queueMode = 0, nil
 local lastSnapshot, matchStart = 0, 0
 local bestCombo = 0
 local settings = {}
+-- Display state only. The server decides both of these; this is the last thing
+-- it told us, used to draw the board and to label the museum.
+local ownedSkins, equippedSkin = { [SkinData.DEFAULT_ID] = true }, SkinData.DEFAULT_ID
 
 local hud = Hud.new(gui, {})
 local ui
@@ -224,17 +228,23 @@ ui = LobbyUi.new(gui, {
 	end,
 	onPaletteChanged = function(on)
 		settings.colourblind = on
-		hud.renderer:setPalette(on)
-		hud.oppRenderer:setPalette(on)
+		hud:setColourblind(on)
 	end,
 	onSaveSettings = function(s)
 		Remotes.SaveSettings:FireServer(s)
 	end,
 })
 
-local pads = PadController.new(function(mode)
+local pads = PadController.new(function(mode, pad)
 	if state ~= Enums.State.Idle then return end
-	if mode == Enums.Mode.Practice then
+	if mode == "skin" then
+		-- A request. If it is not owned the server says no, and the prompt has
+		-- already said LOCKED, so nothing is lost by asking.
+		if pad and pad.skinId then
+			Remotes.EquipSkin:FireServer({ skinId = pad.skinId })
+			SoundKit.play("uiPress")
+		end
+	elseif mode == Enums.Mode.Practice then
 		-- The practice pad runs a sprint, so the result can be recorded against
 		-- a best time instead of vanishing.
 		Remotes.Practice:FireServer({ mode = Enums.Mode.Sprint })
@@ -247,6 +257,18 @@ local pads = PadController.new(function(mode)
 		setState(Enums.State.Queued)
 		SoundKit.play("queue")
 	end
+end, function(pad)
+	-- The museum plaque already says what the exhibit is; the prompt says what
+	-- you can do about it.
+	if pad.mode ~= "skin" or not pad.skinId then return nil end
+	local skin = SkinData.get(pad.skinId)
+	if not skin then return nil end
+	if equippedSkin == pad.skinId then
+		return skin.name, "EQUIPPED  ·  " .. skin.description
+	elseif ownedSkins[pad.skinId] then
+		return skin.name, "OWNED  ·  stand here to equip"
+	end
+	return skin.name, "LOCKED  ·  " .. skin.description
 end)
 
 -- ── Server messages ───────────────────────────────────────────────────────
@@ -368,9 +390,18 @@ Remotes.Profile.OnClientEvent:Connect(function(profile)
 	ui:applyProfile(profile)
 	if profile.das then Tuning.DAS = profile.das / 1000 end
 	if profile.arr then Tuning.ARR = profile.arr / 1000 end
-	if profile.colourblind then
-		hud.renderer:setPalette(true)
-		hud.oppRenderer:setPalette(true)
+	if profile.colourblind ~= nil then
+		hud:setColourblind(profile.colourblind)
+	end
+	-- Entitlement arrives with the profile and is never decided here. A patched
+	-- client can paint its own board any colour it likes; what it cannot do is
+	-- make the server persist a skin it does not own.
+	if type(profile.ownedSkins) == "table" then
+		ownedSkins = profile.ownedSkins
+	end
+	if type(profile.equippedSkin) == "string" then
+		equippedSkin = profile.equippedSkin
+		hud:setSkin(equippedSkin)
 	end
 end)
 
