@@ -11,6 +11,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Pieces = require(Shared.Pieces)
 local SkinData = require(Shared.SkinData)
+local BlitzScoring = require(Shared.BlitzScoring)
 local Tuning = require(Shared.Tuning)
 local BoardRenderer = require(script.Parent.BoardRenderer)
 
@@ -250,6 +251,23 @@ function Hud.new(parent: Instance, opts: any?)
 end
 
 -- One place that knows both boards and the previews share a palette.
+-- Blitz replaces the hint line with the two numbers the mode is about. It
+-- reuses the label that is already there rather than building a second HUD:
+-- the board still has to be the thing worth looking at.
+function Hud:setBlitz(remaining: number?, score: number?)
+	if not remaining then
+		self.blitzOn = false
+		return
+	 end
+	self.blitzOn = true
+	local clamped = math.max(0, remaining)
+	self.hint.Text = ("BLITZ  \u{00B7}  %d:%04.1f  \u{00B7}  SCORE %s"):format(
+		math.floor(clamped / 60), clamped % 60, BlitzScoring.format(score or 0))
+	-- The last ten seconds are the only part of a two-minute run where the clock
+	-- matters more than the board, so that is the only part that changes colour.
+	self.hint.TextColor3 = clamped <= 10 and Theme.C.red or Theme.C.muted
+end
+
 function Hud:setSkin(skinId: string?)
 	self.skinId = SkinData.exists(skinId) and skinId or SkinData.DEFAULT_ID
 	self.palette = SkinData.paletteFor(self.skinId, self.colourblind)

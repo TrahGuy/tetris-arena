@@ -21,7 +21,7 @@
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
-	GlobalRank, Enums, SkinData, PuzzleService
+	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -1857,6 +1857,267 @@ function T.puzzlePersistence()
 	check("secret: which is not owned by default", not SkinData.get(SkinData.SECRET_ID).defaultOwned)
 end
 
+-- == Blitz (Phase 15) =====================================================
+
+-- The score table, pinned exactly. Every number below is a balance decision,
+-- and a balance decision that drifts silently is a bug nobody reports.
+function T.blitzScoring()
+	local function s(lines, tspin, b2b, combo, perfect)
+		return BlitzScoring.score({ lines = lines, tspin = tspin, b2b = b2b,
+			combo = combo or 1, perfect = perfect })
+	end
+
+	eq("blitz: no clear scores nothing", s(0), 0)
+	eq("blitz: single", s(1), 100)
+	eq("blitz: double", s(2), 300)
+	eq("blitz: triple", s(3), 500)
+	eq("blitz: quad", s(4), 800)
+
+	eq("blitz: T-spin single", s(1, "full"), 800)
+	eq("blitz: T-spin double", s(2, "full"), 1200)
+	eq("blitz: T-spin triple", s(3, "full"), 1600)
+	eq("blitz: mini single", s(1, "mini"), 200)
+	eq("blitz: mini double", s(2, "mini"), 400)
+
+	eq("blitz: a spin that cleared nothing scores nothing", s(0, "full"), 0)
+	eq("blitz: nor a mini that cleared nothing", s(0, "mini"), 0)
+
+	eq("blitz: back-to-back quad", s(4, nil, true), 1200)
+	eq("blitz: back-to-back T-spin single", s(1, "full", true), 1200)
+	eq("blitz: back-to-back T-spin double", s(2, "full", true), 1800)
+	eq("blitz: an ordinary single takes no multiplier", s(1, nil, false), 100)
+
+	eq("blitz: the first clear of a combo adds nothing", s(1, nil, false, 1), 100)
+	eq("blitz: the second adds 50", s(1, nil, false, 2), 150)
+	eq("blitz: the third adds 100", s(1, nil, false, 3), 200)
+
+	eq("blitz: a perfect clear adds 3500 once", s(1, nil, false, 1, true), 3600)
+	eq("blitz: everything at once, each part once",
+		s(2, "full", true, 3, true), 1800 + 100 + 3500)
+
+	eq("blitz: junk scores nothing", BlitzScoring.score(nil), 0)
+	eq("blitz: and so does a clear of negative lines", s(-3), 0)
+
+	eq("blitz: scores read with separators", BlitzScoring.format(12450), "12,450")
+	eq("blitz: short ones do not", BlitzScoring.format(950), "950")
+	eq("blitz: and long ones do twice", BlitzScoring.format(1084300), "1,084,300")
+	eq("blitz: zero", BlitzScoring.format(0), "0")
+end
+
+-- A whole run, driven the way the remote drives it.
+function T.blitzSession()
+	local player = fakePlayer(-401, "Runner")
+	local T0 = 1000
+
+	local session = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	eq("blitz: the session knows its mode", session.mode, Enums.Mode.Blitz)
+	eq("blitz: it runs for exactly BLITZ_TIME", session.endAt - session.startAt, Tuning.BLITZ_TIME)
+	eq("blitz: which is two minutes", Tuning.BLITZ_TIME, 120)
+	eq("blitz: it starts after the countdown", session.startAt - T0, Tuning.COUNTDOWN)
+	check("blitz: it has a seed", type(session.seed) == "number")
+	check("blitz: and a server board", session.board ~= nil)
+	eq("blitz: starting at nothing", session.score, 0)
+
+	local other = Practice.begin(fakePlayer(-402, "Other"), Enums.Mode.Blitz, T0, T0)
+	check("blitz: sessions are uniquely numbered", other.id ~= session.id)
+
+	-- Nothing counts before the start.
+	local live = session.startAt + 1
+	eq("blitz: a placement before the countdown ends is not accepted",
+		(Practice.onLock(player, { sessionId = session.id, index = 1, kind = 1, rot = 1, x = 3, y = 19 },
+			session.startAt - 1)), "not started")
+
+	-- Addressing.
+	eq("blitz: a lock for another session is refused",
+		(Practice.onLock(player, { sessionId = session.id + 99, index = 1 }, live)), "wrong session")
+	eq("blitz: a lock with no session at all is refused",
+		(Practice.onLock(player, { index = 1 }, live)), "wrong session")
+	eq("blitz: a lock addressed to a match is refused",
+		(Practice.onLock(player, { sessionId = session.id, matchId = 7, index = 1 }, live)),
+		"wrong address")
+	eq("blitz: junk is refused", (Practice.onLock(player, "lock", live)), "malformed")
+
+	-- A real placement, hard-dropped where the board says the piece can go.
+	local board = session.board
+	local function place(at, forge)
+		local p = board.piece
+		local msg = {
+			sessionId = session.id,
+			index = session.lastIndex + 1,
+			kind = p.kind, rot = p.rot, x = p.x, y = board:ghostY(),
+		}
+		if forge then
+			for k, v in pairs(forge) do msg[k] = v end
+		end
+		return Practice.onLock(player, msg, at)
+	end
+
+	local verdict = place(live)
+	check("blitz: a legal placement is accepted",
+		verdict == "placed" or verdict == "score", verdict)
+	eq("blitz: the shadow board advanced", board.stats.pieces, 1)
+	eq("blitz: and the index moved on", session.lastIndex, 1)
+
+	-- Out of order.
+	eq("blitz: a repeated index is refused",
+		(Practice.onLock(player, { sessionId = session.id, index = 1, kind = board.piece.kind,
+			rot = 1, x = 3, y = 5 }, live + 1)), "out of order index")
+
+	-- Placements the board cannot produce.
+	eq("blitz: an unreachable placement is refused",
+		(place(live + 1, { x = 99, y = 99 })), "placement is not reachable")
+	eq("blitz: a piece that is not in play is refused",
+		(place(live + 2, { kind = board.piece.kind % 7 + 1, hold = nil })),
+		"piece is not the one in play")
+	eq("blitz: a malformed placement is refused",
+		(place(live + 3, { rot = 9 })), "malformed placement")
+
+	-- Forged competitive fields change nothing: the score is the server's.
+	local before = session.score
+	local forged = place(live + 4, {
+		score = 99999999, scoreDelta = 5000, lines = 999, combo = 99,
+		b2b = true, perfect = true, tspin = "full",
+	})
+	check("blitz: a forged payload is still just a placement",
+		forged == "placed" or forged == "score", tostring(forged))
+	check("blitz: and the score only moved by what the board actually cleared",
+		session.score - before < 5000, tostring(session.score - before))
+
+	-- The deadline is the server's.
+	local late = session.endAt + 1
+	local verdictLate, result = Practice.onLock(player, { sessionId = session.id,
+		index = session.lastIndex + 1, kind = 1, rot = 1, x = 3, y = 19 }, late)
+	eq("blitz: a placement after the deadline ends the run", verdictLate, "finished")
+	check("blitz: with the timer as the reason", result and result.reason == "time")
+	check("blitz: and the run counts", result and result.counts == true)
+	local frozen = session.score
+	eq("blitz: nothing is accepted afterwards",
+		(Practice.onLock(player, { sessionId = session.id, index = 99 }, late)), "finished already")
+	eq("blitz: and the score is fixed", session.score, frozen)
+	check("blitz: finalizing an ended run again yields nothing",
+		Practice.finalize(player, "time") == nil)
+
+	Practice.forget(player)
+	Practice.forget(fakePlayer(-402, "Other"))
+end
+
+-- The three ways a run ends, and which of them count.
+function T.blitzEnding()
+	local player = fakePlayer(-403, "Ender")
+	local T0 = 2000
+
+	-- The timer, with nobody reporting anything.
+	local session = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	eq("blitz end: nothing is due before the deadline", #Practice.step(session.endAt - 1), 0)
+	local done = Practice.step(session.endAt)
+	eq("blitz end: the server ends it on its own clock", #done, 1)
+	eq("blitz end: for the right player", done[1].player, player)
+	eq("blitz end: because time ran out", done[1].result.reason, "time")
+	check("blitz end: and it counts", done[1].result.counts)
+	eq("blitz end: it is only reported once", #Practice.step(session.endAt + 5), 0)
+	Practice.forget(player)
+
+	-- Topping out.
+	local s2 = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	local verdict, result = Practice.onLock(player,
+		{ sessionId = s2.id, topout = true }, s2.startAt + 10)
+	eq("blitz end: a top-out finishes the run", verdict, "finished")
+	eq("blitz end: reported as a top-out", result.reason, "topout")
+	check("blitz end: and it still counts", result.counts)
+	Practice.forget(player)
+
+	-- Walking away.
+	local s3 = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	local abandoned = Practice.finalize(player, "abandoned")
+	check("blitz end: an abandoned run does not count", abandoned and not abandoned.counts)
+	Practice.forget(player)
+
+	-- Busy-ness, which the secret nook asks about.
+	local s4 = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	check("blitz end: a live run makes the player busy", Practice.isBusy(player))
+	Practice.finalize(player, "time")
+	check("blitz end: a finished one does not", not Practice.isBusy(player))
+	Practice.forget(player)
+	check("blitz end: and neither does none at all", not Practice.isBusy(player))
+
+	-- Sprint is untouched by any of it.
+	local sprint = Practice.begin(player, Enums.Mode.Sprint, T0, T0)
+	eq("blitz end: sprint is still sprint", sprint.mode, Enums.Mode.Sprint)
+	check("blitz end: and keeps no shadow board", sprint.board == nil)
+	check("blitz end: nor makes the player busy", not Practice.isBusy(player))
+	eq("blitz end: a blitz lock finds no blitz session",
+		(Practice.onLock(player, { sessionId = sprint.id, index = 1 }, T0 + 10)), "no session")
+	Practice.forget(player)
+end
+
+-- What a run does to a profile, and what it must not.
+function T.blitzPersistence()
+	local fresh = Stats.migrateForTest(nil)
+	eq("blitz best: a new profile has none", fresh.bestBlitz, 0)
+	local legacy = Stats.migrateForTest({ wins = 4, rating = 1150 })
+	eq("blitz best: an old profile migrates to none", legacy.bestBlitz, 0)
+	eq("blitz best: keeping the rest", legacy.rating, 1150)
+	local kept = Stats.migrateForTest({ bestBlitz = 42000 })
+	eq("blitz best: a stored best survives", kept.bestBlitz, 42000)
+	local junk = Stats.migrateForTest({ bestBlitz = "lots" })
+	eq("blitz best: junk does not", junk.bestBlitz, 0)
+
+	-- Merged with max, so a stale server cannot take a record away.
+	local base = { ownedSkins = {}, equippedSkin = "classic", secretPuzzleSolved = false }
+	local function merged(stored, mine)
+		local profile = table.clone(base)
+		profile.bestBlitz = mine
+		return Stats.mergeProgressForTest({ bestBlitz = stored }, profile).bestBlitz
+	end
+	eq("blitz best: a stale lower save cannot erase a higher one", merged(42000, 39000), 42000)
+	eq("blitz best: a better run replaces it", merged(42000, 46000), 46000)
+	eq("blitz best: an equal one is harmless", merged(42000, 42000), 42000)
+	eq("blitz best: a first record writes", merged(0, 15000), 15000)
+
+	-- The record path.
+	local player = fakePlayer(-404, "Scorer")
+	Stats.load(player)
+	eq("blitz best: starts at nothing", Stats.get(player).bestBlitz, 0)
+	local ratingBefore = Stats.get(player).rating
+	local sprintBefore = Stats.get(player).bestSprint
+
+	eq("blitz best: an abandoned run is not recorded",
+		Stats.recordBlitz(player, { score = 90000, counts = false, lines = 4 }), "not counted")
+	eq("blitz best: and sets nothing", Stats.get(player).bestBlitz, 0)
+
+	eq("blitz best: a finished run records",
+		Stats.recordBlitz(player, { score = 12450, counts = true, lines = 20, quads = 2 }), "record")
+	eq("blitz best: the score is the best", Stats.get(player).bestBlitz, 12450)
+	eq("blitz best: a lower run keeps the old best",
+		Stats.recordBlitz(player, { score = 9000, counts = true, lines = 8 }), "kept")
+	eq("blitz best: which is unchanged", Stats.get(player).bestBlitz, 12450)
+	eq("blitz best: an equal run keeps it too",
+		Stats.recordBlitz(player, { score = 12450, counts = true, lines = 8 }), "kept")
+	eq("blitz best: a better run takes it",
+		Stats.recordBlitz(player, { score = 20000, counts = true, lines = 30 }), "record")
+	eq("blitz best: and is stored", Stats.get(player).bestBlitz, 20000)
+	eq("blitz best: junk is refused", Stats.recordBlitz(player, nil), "not counted")
+
+	-- A score attack is not a ranked match and must not look like one.
+	local p = Stats.get(player)
+	eq("blitz best: rating untouched", p.rating, ratingBefore)
+	eq("blitz best: ranked wins untouched", p.rankedWins, 0)
+	eq("blitz best: ranked losses untouched", p.rankedLosses, 0)
+	eq("blitz best: ranked draws untouched", p.rankedDraws, 0)
+	eq("blitz best: the sprint record is its own", p.bestSprint, sprintBefore)
+	eq("blitz best: no skin was granted", p.ownedSkins[SkinData.SECRET_ID], nil)
+	eq("blitz best: the secret is still unsolved", p.secretPuzzleSolved, false)
+
+	-- Nor can the client write any of it through the one path it has.
+	Stats.applySettings(player, { bestBlitz = 999999, score = 999999, das = 150 })
+	eq("blitz best: SaveSettings cannot set a score", Stats.get(player).bestBlitz, 20000)
+	eq("blitz best: settings still apply", Stats.get(player).das, 150)
+
+	-- A Sprint result leaves the Blitz best alone, and the other way round.
+	Stats.recordPractice(player, { mode = Enums.Mode.Sprint, lines = 40, time = 30, sprint = true })
+	eq("blitz best: a sprint does not touch it", Stats.get(player).bestBlitz, 20000)
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -1999,6 +2260,7 @@ function T.run(root: Instance?, services: Instance?)
 	MatchInstance = require((services :: any).MatchInstance)
 	Stats = require((services :: any).StatsService)
 	Practice = require((services :: any).PracticeService)
+	BlitzScoring = require((root :: any).BlitzScoring)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
 	SkinData = require((root :: any).SkinData)
@@ -2013,6 +2275,7 @@ function T.run(root: Instance?, services: Instance?)
 		"globalRankWiring", "globalRankRender",
 		"skinCatalog", "skinOwnership", "skinMigration", "skinIsCosmetic",
 		"puzzleGeometry", "puzzleSolving", "puzzleSessions", "puzzlePersistence",
+		"blitzScoring", "blitzSession", "blitzEnding", "blitzPersistence",
 		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])

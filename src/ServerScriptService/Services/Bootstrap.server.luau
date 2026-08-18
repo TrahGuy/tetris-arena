@@ -33,11 +33,18 @@ end
 -- The secret nook. Discovers the unfinished board Phase 1 built and hangs
 -- prompts on it; if the geometry is not what it expects it warns once and stays
 -- switched off rather than taking the lobby down with it.
-local Puzzle = PuzzleService.new({ stats = Stats, matchmaking = Matchmaking })
+local Puzzle = PuzzleService.new({ stats = Stats, matchmaking = Matchmaking, solo = Practice })
 do
 	local lobby = workspace:FindFirstChild("Lobby")
 	local ok, why = Puzzle:bind(lobby and lobby:FindFirstChild("Secret"))
 	print(("[BlockArena] secret puzzle: %s"):format(ok and "ready" or why))
+end
+
+-- The Training Zone shipped with one pad. Blitz gets its own, beside it.
+do
+	local lobby = workspace:FindFirstChild("Lobby")
+	local wired = Practice.wirePads(lobby and lobby:FindFirstChild("Training"))
+	print(("[BlockArena] blitz pad: %s"):format(wired and "ready" or "no training zone"))
 end
 
 -- Live-tunable constants land on a folder so they can be adjusted from the
@@ -67,9 +74,45 @@ Remotes.QueueCancel.OnServerEvent:Connect(function(player)
 	Matchmaking.cancel(player)
 end)
 
+-- One place a Blitz run ends, whoever noticed first: the deadline, a top-out,
+-- or the player disconnecting. PracticeService.finalize is idempotent, so the
+-- races between those three cannot pay out twice.
+local function finishBlitz(player, result)
+	if not result then return end
+	local verdict = Stats.recordBlitz(player, result)
+	Practice.forget(player)
+	Stats.refreshLeaderboard()
+	if player.Parent then
+		Remotes.Practice:FireClient(player, {
+			sessionId = result.sessionId,
+			finished = true,
+			result = result,
+			record = verdict == "record",
+		})
+	end
+end
+
+-- One routing rule, and it is exclusive.
+--
+-- A competitive lock names its match; a solo Blitz lock names its session. A
+-- message carrying both is not ambiguous so much as dishonest -- there is no
+-- legitimate client that would send one -- and letting it through would be the
+-- one way a lock meant for a score attack could reach a ranked match.
 Remotes.Lock.OnServerEvent:Connect(function(player, msg)
 	if not limits.lock:allow(player) then return end
-	Matchmaking.onLock(player, msg)
+	if type(msg) ~= "table" then return end
+	local hasMatch, hasSession = msg.matchId ~= nil, msg.sessionId ~= nil
+	if hasMatch == hasSession then return end -- both, or neither
+	if hasMatch then
+		Matchmaking.onLock(player, msg)
+		return
+	end
+	local verdict, payload = Practice.onLock(player, msg, workspace:GetServerTimeNow())
+	if verdict == "score" then
+		Remotes.Practice:FireClient(player, payload)
+	elseif verdict == "finished" then
+		finishBlitz(player, payload)
+	end
 end)
 
 Remotes.Forfeit.OnServerEvent:Connect(function(player, msg)
@@ -117,12 +160,20 @@ Remotes.Practice.OnServerEvent:Connect(function(player, msg)
 	-- A practice board must not overlap a real one in either direction, or the
 	-- same stretch of wall clock backs two runs.
 	if Matchmaking.matchFor(player) or Matchmaking.isQueued(player) then return end
-	local session = Practice.begin(player, msg.mode, os.clock())
+	-- Starting a run gives up the nook: a player cannot be two minutes into a
+	-- score attack and holding the shared puzzle at the same time.
+	Puzzle:playerLeaving(player)
+	local session = Practice.begin(player, msg.mode, os.clock(), workspace:GetServerTimeNow())
 	Remotes.Practice:FireClient(player, {
 		sessionId = session.id,
 		seed = session.seed,
 		mode = session.mode,
 		gravity = Tuning.GRAVITY,
+		-- Blitz only. Both ends read workspace:GetServerTimeNow(), so the run
+		-- starts and ends at the same instant for the server and the player
+		-- whatever the round trip cost.
+		startAt = session.startAt,
+		endAt = session.endAt,
 	})
 end)
 
@@ -169,6 +220,10 @@ RunService.Heartbeat:Connect(function(dt)
 	-- Timeout, a solver who wandered off to queue, a character that vanished:
 	-- one place decides the session is over.
 	Puzzle:step(os.clock())
+	-- Blitz ends when the server says so, with or without the client.
+	for _, done in ipairs(Practice.step(workspace:GetServerTimeNow())) do
+		finishBlitz(done.player, done.result)
+	end
 end)
 
 -- Live match state on an attribute. A running server shares nothing else with
@@ -183,6 +238,7 @@ task.spawn(function()
 		debugFolder:SetAttribute("Matchmaking", Matchmaking.debugSummary())
 		debugFolder:SetAttribute("Players", #Players:GetPlayers())
 		-- Attributes rather than prints: this loop ticks twice a second.
+		debugFolder:SetAttribute("Solo", Practice.debugSummary(workspace:GetServerTimeNow()))
 		local q = Puzzle:status(os.clock())
 		debugFolder:SetAttribute("PuzzleStatus", q.status)
 		debugFolder:SetAttribute("PuzzleSolver", q.solver)

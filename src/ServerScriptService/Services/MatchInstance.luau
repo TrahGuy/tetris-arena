@@ -20,11 +20,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Board = require(Shared.Board)
-local Pieces = require(Shared.Pieces)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
 local Attack = require(Shared.Attack)
 local Net = require(Shared.Net)
+local LockValidation = require(Shared.LockValidation)
 local Remotes = require(Shared.Remotes)
 local BotService = require(script.Parent.BotService)
 
@@ -268,52 +268,20 @@ function MatchInstance:applyLock(side: any, msg: any)
 		return self:_reject(side, "locking faster than physically possible")
 	end
 
+	-- Shared with the solo Blitz shadow, so a ranked placement and a score-attack
+	-- placement are judged by one piece of code rather than two that agree today.
 	local b = side.board
-	if not b.piece then return self:_reject(side, "no active piece") end
-
-	local kind, rot, x, y = tonumber(msg.kind), tonumber(msg.rot), tonumber(msg.x), tonumber(msg.y)
-	if not (kind and rot and x and y) or rot < 1 or rot > 4 then
-		return self:_reject(side, "malformed placement")
+	local ok, why = LockValidation.accept(b, msg)
+	if not ok then
+		return self:_reject(side, why)
 	end
-
-	-- The claimed piece must be one the player could actually have: the active
-	-- one, or a legal hold swap into it.
-	if kind ~= b.piece.kind then
-		local canSwap = not b.holdUsed
-			and (b.hold == kind or (b.hold == nil and b.bag:peek(1)[1] == kind))
-		if not canSwap then
-			return self:_reject(side, "piece is not the one in play")
-		end
-		b:swapHold()
-	end
-	if not b:reachable(kind, rot, x, y) then
-		return self:_reject(side, "placement is not reachable")
-	end
-
-	-- The shadow is advanced by placements, not by inputs, so it never runs the
-	-- rotation that makes a spin a spin. The client sends the rotation it says
-	-- it made and the server replays it here against its own cells; only a
-	-- rotation that genuinely lands on this square, from a square the piece
-	-- could have reached, sets the flag. Everything downstream — full or mini,
-	-- the line count, back-to-back, the combo, the attack — is then derived by
-	-- b:lock() from the server's board. Nothing about the result comes off the
-	-- wire. Restricted to T because nothing else scores a spin, and the check
-	-- costs a reachability search.
-	b.lastKick = kind == Pieces.T and b:verifySpin(kind, rot, x, y, msg.spin) or false
 
 	side.lastIndex = index
 	side.lastLockAt = now
 	side.accepted += 1
-	b.piece.rot, b.piece.x, b.piece.y = rot, x, y
 	b.time = self.elapsed
 	b:lock()
-
-	-- The shadow does not run gravity, so it never spawns on its own.
-	if b.alive and not b.piece then
-		b.spawnDelay = 0
-		b:applyReadyGarbage()
-		if b.alive then b:spawn() end
-	end
+	LockValidation.respawn(b)
 	self:_drain(side)
 end
 

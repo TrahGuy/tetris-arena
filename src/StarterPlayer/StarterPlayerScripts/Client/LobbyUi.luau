@@ -13,6 +13,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
+local BlitzScoring = require(Shared.BlitzScoring)
 
 local LobbyUi = {}
 LobbyUi.__index = LobbyUi
@@ -413,6 +414,13 @@ function LobbyUi:showResults(payload: any, canRematch: boolean)
 		self.resultSub.Text = payload.sprintTime
 			and string.format("40 lines in %.2f seconds.", payload.sprintTime)
 			or "40 lines cleared."
+	elseif payload.reason == "blitz" then
+		self.resultTitle.Text = payload.topout and "BLITZ \u{00B7} TOP OUT" or "BLITZ COMPLETE"
+		self.resultTitle.TextColor3 = payload.record and Theme.C.gold or Theme.C.mg
+		self.resultSub.Text = ("SCORE %s   \u{00B7}   BEST %s%s"):format(
+			BlitzScoring.format(payload.score or 0),
+			BlitzScoring.format(payload.best or 0),
+			payload.record and "   \u{00B7}   NEW BEST" or "")
 	elseif payload.reason == "practice" then
 		self.resultTitle.Text = "PRACTICE OVER"
 		self.resultTitle.TextColor3 = Theme.C.violet

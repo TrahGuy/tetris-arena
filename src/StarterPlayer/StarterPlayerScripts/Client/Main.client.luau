@@ -69,6 +69,11 @@ local ownedSkins, equippedSkin = { [SkinData.DEFAULT_ID] = true }, SkinData.DEFA
 -- nil until the first profile arrives, so a player who solved the nook in an
 -- earlier session is not congratulated again the moment they log in.
 local secretSolved = nil
+-- Everything about a Blitz run that the client is allowed to know: the deadline
+-- the server set, and the score the server last told us. Neither is computed
+-- here.
+local blitz = nil
+local bestBlitz = 0
 
 local hud = Hud.new(gui, {})
 local ui
@@ -129,7 +134,21 @@ local function startSim(seed: number, opts: any, info: any?)
 				SoundKit.play("lock")
 			end
 		end
-		if matchInfo and matchInfo.networked then
+		if matchInfo and matchInfo.blitz then
+			-- A solo run is addressed by session. The payload carries where the
+			-- piece went and the rotation that put it there; the score, the lines
+			-- and the clear are all the server's to work out.
+			Remotes.Lock:FireServer({
+				sessionId = matchInfo.sessionId,
+				index = payload.index,
+				tick = payload.tick,
+				kind = payload.kind,
+				rot = payload.rot,
+				x = payload.x,
+				y = payload.y,
+				spin = payload.spin,
+			})
+		elseif matchInfo and matchInfo.networked then
 			Remotes.Lock:FireServer({
 				-- Every competitive message names its match. The server drops
 				-- anything addressed to a match it is no longer running.
@@ -158,7 +177,11 @@ local function startSim(seed: number, opts: any, info: any?)
 			SoundKit.play("ko")
 			fx:onKo(false)
 			hud:setOverlay("KO", Theme.C.red)
-			if matchInfo and matchInfo.networked then
+			if matchInfo and matchInfo.blitz then
+				-- Ends the run early. The score already earned is the server's and
+				-- it keeps it.
+				Remotes.Lock:FireServer({ sessionId = matchInfo.sessionId, topout = true })
+			elseif matchInfo and matchInfo.networked then
 				Remotes.Lock:FireServer({
 					matchId = matchInfo.matchId, topout = true, reason = e.data.reason,
 				})
@@ -251,6 +274,11 @@ local pads = PadController.new(function(mode, pad)
 		-- The practice pad runs a sprint, so the result can be recorded against
 		-- a best time instead of vanishing.
 		Remotes.Practice:FireServer({ mode = Enums.Mode.Sprint })
+	elseif mode == Enums.Mode.Blitz then
+		-- Solo, so it asks for a session rather than joining a queue. There is
+		-- nobody to wait for.
+		Remotes.Practice:FireServer({ mode = Enums.Mode.Blitz })
+		SoundKit.play("queue")
 	elseif mode == Enums.Mode.Emote then
 		-- Nothing to queue; the lounge pad is decorative until Phase 7 emotes.
 	else
@@ -390,6 +418,67 @@ Remotes.Result.OnClientEvent:Connect(function(payload)
 end)
 
 Remotes.Practice.OnClientEvent:Connect(function(msg)
+	-- A running score, straight from the server. The client never adds anything
+	-- to it; it only shows what it was told.
+	if msg.score and blitz then
+		blitz.score = msg.score
+		return
+	end
+	if msg.finished and msg.result then
+		local r = msg.result
+		if input then input:disable() end
+		if fx then fx:onKo(msg.record == true) end
+		SoundKit.setMusic("musicLobby")
+		SoundKit.play(msg.record and "go" or "ko")
+		hud:setBlitz(nil)
+		hud:setOverlay(nil)
+		ui:showResults({
+			outcome = Enums.Result.Draw,
+			reason = "blitz",
+			topout = r.reason == "topout",
+			record = msg.record == true,
+			score = r.score,
+			best = math.max(r.score or 0, bestBlitz),
+			stats = {
+				lines = r.lines, sent = r.score, pieces = r.pieces, quads = r.quads,
+				apm = r.tspins, bestCombo = r.bestCombo,
+			},
+		}, false)
+		blitz = nil
+		setState(Enums.State.Results)
+		return
+	end
+	if msg.seed and msg.mode == Enums.Mode.Blitz then
+		-- The server decided when this starts and ends. Both ends read the same
+		-- clock, so a slow round trip costs the player none of their two minutes.
+		blitz = { sessionId = msg.sessionId, startAt = msg.startAt, endAt = msg.endAt, score = 0 }
+		startSim(msg.seed, { gravity = msg.gravity }, {
+			blitz = true, sessionId = msg.sessionId, mode = msg.mode,
+		})
+		hud:setOpponentVisible(false)
+		setState(Enums.State.Countdown)
+		task.spawn(function()
+			local last = nil
+			while blitz and workspace:GetServerTimeNow() < blitz.startAt do
+				local left = math.ceil(blitz.startAt - workspace:GetServerTimeNow())
+				if left ~= last and left > 0 then
+					last = left
+					hud:setOverlay(tostring(left))
+					SoundKit.play("countdown")
+				end
+				task.wait(0.05)
+			end
+			if not blitz then return end
+			hud:setOverlay("GO")
+			SoundKit.play("go")
+			SoundKit.setMusic("musicMatch")
+			setState(Enums.State.Playing)
+			if input then input:arm() end
+			matchStart = os.clock()
+			task.delay(0.5, function() hud:setOverlay(nil) end)
+		end)
+		return
+	end
 	if msg.seed then
 		-- The session id goes back with the result: the server times the run
 		-- from when it issued this seed.
@@ -417,6 +506,9 @@ Remotes.Profile.OnClientEvent:Connect(function(profile)
 	-- make the server persist a skin it does not own.
 	if type(profile.ownedSkins) == "table" then
 		ownedSkins = profile.ownedSkins
+	end
+	if type(profile.bestBlitz) == "number" then
+		bestBlitz = profile.bestBlitz
 	end
 	if type(profile.equippedSkin) == "string" then
 		equippedSkin = profile.equippedSkin
@@ -485,6 +577,13 @@ RunService.RenderStepped:Connect(function(dt)
 
 	local elapsed = math.max(os.clock() - matchStart, 0.001)
 	hud:setStats(b.stats.sent / elapsed * 60, b.stats.pieces / elapsed, b.stats.sent, b.stats.lines)
+
+	-- The Blitz clock is the server's deadline minus the shared clock, not a
+	-- local stopwatch: a client whose frame loop stalls loses no time and gains
+	-- none. Reading two numbers per frame; the label is written, not rebuilt.
+	if blitz and matchInfo and matchInfo.blitz then
+		hud:setBlitz(blitz.endAt - workspace:GetServerTimeNow(), blitz.score)
+	end
 
 	-- Practice is a 40-line sprint, so it has a goal and a clock rather than
 	-- being a board that goes nowhere.

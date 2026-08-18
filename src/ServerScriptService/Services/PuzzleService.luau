@@ -67,6 +67,7 @@ function PuzzleService.new(deps: any?)
 	return setmetatable({
 		stats = deps.stats,
 		matchmaking = deps.matchmaking,
+		solo = deps.solo,
 		enabled = false,
 		reason = "not bound",
 		board = nil,
@@ -210,6 +211,9 @@ function PuzzleService:_mayClaim(player: any): string?
 	-- Nothing left to win. The shared nook is not reserved for a replay that
 	-- cannot pay anything, so the next player who has not solved it can.
 	if self.stats.hasSolvedSecret(player) then return "already solved" end
+	-- A player two minutes into a score attack is not idle in the lobby, and
+	-- their character is standing wherever they left it.
+	if self.solo and self.solo.isBusy(player) then return "mid run" end
 	if self.matchmaking then
 		if self.matchmaking.matchFor(player) then return "in a match" end
 		-- Queued players get pulled into a match mid-placement, which would
@@ -388,6 +392,10 @@ function PuzzleService:step(now: number)
 	if self.matchmaking
 		and (self.matchmaking.matchFor(player) or self.matchmaking.isQueued(player)) then
 		self:release("went to play")
+		return
+	end
+	if self.solo and self.solo.isBusy(player) then
+		self:release("started a run")
 	end
 end
 

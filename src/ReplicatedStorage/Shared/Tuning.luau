@@ -38,6 +38,7 @@ Tuning.BOT_AFTER = 20        -- queue this long with no human -> offer a bot
 
 -- ── Practice ──────────────────────────────────────────────────────────────
 Tuning.SPRINT_GOAL = 40      -- lines in a sprint; the server vets records against it
+Tuning.BLITZ_TIME = 120      -- seconds of Blitz; the server owns this deadline, not the client
 -- Sustained placement rate no human reaches. MIN_LOCK_INTERVAL below is a
 -- per-lock guard and has to tolerate bursts, so it sits at 33/s; this one is an
 -- average over a whole run and can be far tighter. The sprint record floor
@@ -56,6 +57,9 @@ Tuning.APM_WINDOW = 20
 local LIVE = {
 	"DAS", "ARR", "GRAVITY", "SOFT_DROP_G", "LOCK_DELAY", "LOCK_RESETS",
 	"ARE", "CLEAR_DELAY", "GARBAGE_DELAY", "SUDDEN_DEATH", "MATCH_CAP", "BOT_AFTER",
+	-- Live so a two-minute run can be shortened for testing without editing the
+	-- default, which stays at 120 and is what a fresh server always starts from.
+	"BLITZ_TIME",
 }
 
 -- Publishes the live subset as attributes and keeps the table in step with any

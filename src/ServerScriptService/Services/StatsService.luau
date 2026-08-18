@@ -20,6 +20,7 @@ local Theme = require(Shared.Theme)
 local Enums = require(Shared.Enums)
 local Remotes = require(Shared.Remotes)
 local SkinData = require(Shared.SkinData)
+local BlitzScoring = require(Shared.BlitzScoring)
 local GlobalRank = require(script.Parent.GlobalRank)
 
 local StatsService = {}
@@ -56,6 +57,9 @@ local DEFAULT = {
 	-- future purchase without ever having found the puzzle, and solving it
 	-- while already owning the skin still counts as having solved it.
 	secretPuzzleSolved = false,
+	-- Blitz is a score attack, so higher is better — the opposite of bestSprint
+	-- above, which is a time.
+	bestBlitz = 0,
 }
 
 -- Elo. The RANKED pad was queuing exactly like quick play, which made the label
@@ -217,6 +221,10 @@ local function unionProgress(merged: any, profile: any): any
 	-- can save after a newer one, and finding the secret is not something a
 	-- stale write gets to undo.
 	merged.secretPuzzleSolved = (merged.secretPuzzleSolved or profile.secretPuzzleSolved) == true
+	-- Blitz is a score, so the best one is the highest — the opposite of the
+	-- sprint record, which is a time. Max for the same reason ownership unions
+	-- and completion ORs: a stale server must not take a record away.
+	merged.bestBlitz = math.max(tonumber(merged.bestBlitz) or 0, tonumber(profile.bestBlitz) or 0)
 	return merged
 end
 
@@ -495,6 +503,35 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 	StatsService.refreshLeaderboard()
 end
 
+-- A finished Blitz run, from PracticeService and nowhere else.
+--
+-- `result` was built from the server's shadow board: the score was computed on
+-- this machine from clears this server derived. No remote reaches this function
+-- and no field in what it is handed was written by a client.
+--
+-- Only a run that was played out can set a record. Abandoning one is not a
+-- score, or stopping the moment you were ahead would be the whole strategy.
+--
+-- Returns "record", "kept", "not counted" or "no profile".
+function StatsService.recordBlitz(player: Player, result: any): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	if type(result) ~= "table" or not result.counts then return "not counted" end
+	local score = math.max(0, math.floor(tonumber(result.score) or 0))
+	p.lines += math.max(0, math.floor(tonumber(result.lines) or 0))
+	p.quads += math.max(0, math.floor(tonumber(result.quads) or 0))
+	dirty[player.UserId] = true
+	local verdict = "kept"
+	if score > p.bestBlitz then
+		p.bestBlitz = score
+		verdict = "record"
+	end
+	if player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return verdict
+end
+
 -- `record` comes from PracticeService.vet, never straight off the wire. Every
 -- number here has already been bounded by the wall clock the server measured,
 -- so this credits rather than judges.
@@ -619,11 +656,12 @@ function StatsService.refreshLeaderboard()
 		table.insert(streak, { i, e and e.name or "—", e and e.p.streak or 0 })
 	end
 
-	local bestLines, bestQuads, bestSprint = 0, 0, 0
-	local nameLines, nameQuads, nameSprint = "—", "—", "—"
+	local bestLines, bestQuads, bestSprint, bestBlitz = 0, 0, 0, 0
+	local nameLines, nameQuads, nameSprint, nameBlitz = "—", "—", "—", "—"
 	for _, e in ipairs(ranked) do
 		if e.p.lines > bestLines then bestLines, nameLines = e.p.lines, e.name end
 		if e.p.quads > bestQuads then bestQuads, nameQuads = e.p.quads, e.name end
+		if e.p.bestBlitz > bestBlitz then bestBlitz, nameBlitz = e.p.bestBlitz, e.name end
 		if e.p.bestSprint > 0 and (bestSprint == 0 or e.p.bestSprint < bestSprint) then
 			bestSprint, nameSprint = e.p.bestSprint, e.name
 		end
@@ -632,7 +670,8 @@ function StatsService.refreshLeaderboard()
 		{ "LINES", nameLines, bestLines },
 		{ "QUADS", nameQuads, bestQuads },
 		{ "SPRINT", nameSprint, bestSprint > 0 and string.format("%.1fs", bestSprint) or "—" },
-		{ "PLAYERS", "", #ranked },
+		-- Replaced a headcount, which the row above the tower already gives.
+		{ "BLITZ", nameBlitz, bestBlitz > 0 and BlitzScoring.format(bestBlitz) or "—" },
 	}
 
 	for _, part in ipairs(tower:GetChildren()) do

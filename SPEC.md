@@ -92,6 +92,15 @@ Interaction: server-owned ProximityPrompts. No puzzle remote exists; the client 
 Concurrency: one active solver; released on solve, timeout (45s), disconnect, lost character, match or queue.
 `Board.Solved` is temporary world state for the celebration only and always returns to false.
 
+## Blitz
+
+`Tuning.BLITZ_TIME = 120`. Solo score attack, `Enums.Mode.Blitz`, entered from its own Training Zone pad. Never routed through matchmaking; no bot, no garbage, no snapshots.
+Score: single/double/triple/quad 100/300/500/800; T-spin 800/1200/1600; mini 200/400; zero-line spins score 0. B2B multiplies the base by 1.5. Combo adds 50x(combo-1) from the second clear. Perfect clear +3500. Each applies once.
+Authority: server shadow board, `Shared/LockValidation` shared with MatchInstance, score derived from Board's own ClearInfo. Client-supplied score/lines/combo/b2b/perfect are ignored.
+Addressing: solo locks carry `sessionId`, competitive locks carry `matchId`. A payload with both, or neither, is rejected.
+Timing: `startAt`/`endAt` on `workspace:GetServerTimeNow()`. The server finalizes on its own clock; late locks score nothing.
+Persistence: `bestBlitz` on the profile, merged with MAX. Only a run that expired or topped out may set it; abandoning does not. No Elo, no ranked counters, no global index.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

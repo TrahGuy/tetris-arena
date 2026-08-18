@@ -19,7 +19,8 @@ local LABELS = {
 	[Enums.Mode.Quick] = { "QUICK MATCH", "Stand here to queue for a 1v1" },
 	[Enums.Mode.Ranked] = { "RANKED", "Competitive queue" },
 	[Enums.Mode.Private] = { "CREATE ROOM", "Private match with a friend" },
-	[Enums.Mode.Practice] = { "PRACTICE", "Solo board, no stakes" },
+	[Enums.Mode.Practice] = { "SPRINT", "40 lines, solo. Best time is saved" },
+	[Enums.Mode.Blitz] = { "BLITZ", "2:00 score attack. Best score is saved" },
 	[Enums.Mode.Emote] = { "EMOTE ZONE", "Dance / idle rewards" },
 }
 

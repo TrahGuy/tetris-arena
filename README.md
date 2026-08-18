@@ -34,6 +34,7 @@ open at that path). Move it in here when convenient.
 | 12 — Global ranked leaderboard | done |
 | 13 — Skin ownership and equip | done |
 | 14 — Secret puzzle and reward | done |
+| 15 — Blitz mode | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -58,7 +59,7 @@ description — so swap any that sound wrong. One line each.
 
 | Gap | Why |
 | --- | --- |
-| No Blitz mode | Practice is a 40-line Sprint with a clock and a saved best. A 2-minute score attack would need its own scoring table, which does not exist. |
+| No global Blitz board | The best score is saved per account and the tower shows the best in this server. A world ranking would need a second OrderedDataStore; ranked Elo has one, Blitz does not. |
 | A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
 | Only one skin can be earned | The secret nook pays out GALAXY CUBE. GOLDEN T and DIAMOND I still have no source; they wait on the same server-only grant an achievement or a purchase would use. No monetisation is implemented. |
 | WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
@@ -305,9 +306,55 @@ grants the skin and pushes the profile once, so the client never sees a solve
 that has not paid or a payment for a solve that was not recorded. Solving twice
 does nothing at all.
 
+## Blitz
+
+Two minutes, solo, highest score. It sits on its own pad in the Training Zone
+beside Sprint — no queue, no opponent, nothing to wait for.
+
+| clear | | with back-to-back |
+| --- | --- | --- |
+| single / double / triple / quad | 100 / 300 / 500 / 800 | quad 1200 |
+| T-spin single / double / triple | 800 / 1200 / 1600 | double 1800 |
+| mini single / double | 200 / 400 | |
+
+Combo adds `50 x (combo - 1)` from the second consecutive clear. A perfect clear
+adds 3500. Each applies once, in that order. A spin that clears nothing scores
+nothing: Phase 11 already declines to count it as a T-spin, and paying for it
+would make rotating a T in a notch a better use of two minutes than clearing
+lines. There are no points for drop distance or movement either — the shadow
+validates placements, not inputs, so paying for inputs would mean trusting the
+client's account of them.
+
+**The score is the server's.** Blitz keeps a shadow board and validates every
+placement through the same `LockValidation` a ranked match uses: sequential lock
+index, a piece the player could be holding, a reachable square, and the rotation
+witness replayed to decide a spin. The clear, the T-spin, the combo, the
+back-to-back chain and the perfect clear are all derived there, and the score is
+computed from those. The client reports where it put a piece and nothing else;
+`score`, `lines`, `combo`, `b2b` and `perfect` in a lock payload are read by
+nobody.
+
+**The clock is the server's too.** The session carries `startAt` and `endAt` on
+`workspace:GetServerTimeNow()`, which both ends read, so a slow round trip costs
+the player none of their two minutes and a fast one buys them nothing. The
+server ends the run on its own clock whether or not the client says anything,
+and a placement that arrives after the deadline is late whatever the client
+believes.
+
+A run ends three ways. The timer expiring and topping out are both runs played
+out, and both can set `bestBlitz`; a top-out keeps every point earned before it.
+Walking away does not count — a score that only counts when you like the look of
+it is not a score. `bestBlitz` merges with **max**, so a stale server cannot take
+a record away.
+
+Sprint is unchanged and still on its Phase 10 path: the server times the session
+and vets the claim rather than shadowing the board. Blitz needed the shadow
+because it has a number worth cheating for; rewriting a working mode to match
+would have been a redesign nobody asked for.
+
 ## Tests
 
-558 assertions. **Run them in Play mode, from the Server datamodel:**
+660 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()
