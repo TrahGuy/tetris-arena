@@ -9,6 +9,8 @@ local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
 local Remotes = require(Shared.Remotes)
 local MatchInstance = require(script.Parent.MatchInstance)
+local ArenaService = require(script.Parent.ArenaService)
+local TitleData = require(Shared.TitleData)
 
 local MatchmakingService = {}
 
@@ -35,14 +37,73 @@ function MatchmakingService.matchFor(player: Player)
 	return nil
 end
 
+-- How long the winner gets to stand in the arena and read the result before
+-- the server puts everybody back. Instantly snapping away at the KO makes the
+-- battle dimension feel like a loading screen rather than a place.
+local RETURN_AFTER = 2.5
+
 local function start(specA: any, specB: any, mode: string)
-	local m = MatchInstance.new(nextId, specA, specB, { mode = mode })
+	local matchId = nextId
+
+	-- The arena comes first. A match that cannot get one is a match that would
+	-- run in the lobby with a countdown nobody understands, so it does not
+	-- start at all -- the callers put the players back in the queue.
+	local arena, why = ArenaService.allocate(matchId, mode)
+	if not arena and ArenaService.isEnabled() then
+		warn(("[Matchmaking] no arena for match %d: %s"):format(matchId, tostring(why)))
+		return nil
+	end
+
+	-- Whatever each side is presenting as, for the other side's VS card. Has to
+	-- be on the specs: MatchInstance.new sends the countdown before it returns,
+	-- so anything set afterwards would arrive too late to be shown.
+	if statsService then
+		for _, spec in ipairs({ specA, specB }) do
+			if spec.player then
+				local profile = statsService.getProfile(spec.player)
+				local titleId = profile and profile.equippedTitle
+				local title = titleId and TitleData.get(titleId)
+				spec.titleName = title and title.name or nil
+			end
+		end
+	end
+
+	local m = MatchInstance.new(matchId, specA, specB, { mode = mode })
 	nextId += 1
+
+	m.arenaId = arena and matchId or nil
+
+	-- Into the arena immediately, which is the whole of the countdown before
+	-- input arms. Both sides are moved by the same call, so neither is playing
+	-- while the other is still travelling.
+	if arena then
+		for _, pair in ipairs({ { m.a, "A" }, { m.b, "B" } }) do
+			local side, letter = pair[1], pair[2]
+			if side.player then
+				ArenaService.enter(matchId, side.player, letter)
+			end
+		end
+	end
+
 	m.onFinished = function(match, loser, reason)
 		if statsService then
 			statsService.recordMatch(match, loser, reason)
 		end
+		if match.arenaId then
+			task.delay(RETURN_AFTER, function()
+				for _, side in ipairs({ match.a, match.b }) do
+					if side.player and side.player.Parent then
+						ArenaService.returnPlayer(match.arenaId, side.player)
+					end
+				end
+			end)
+		end
 		task.delay(Tuning.RESULTS_TIME, function()
+			if match.arenaId then
+				-- Keyed by this match. If the slot has since been handed to
+				-- another match, that one is untouched.
+				ArenaService.release(match.arenaId)
+			end
 			for i, other in ipairs(matches) do
 				if other == match then
 					table.remove(matches, i)
@@ -66,9 +127,16 @@ function MatchmakingService.enqueue(player: Player, mode: string)
 	for i = 1, #queue - 1 do
 		local other = queue[i]
 		if other.mode == mode and other.player ~= player and other.player.Parent then
+			-- Both come out of the queue only if the match actually starts.
+			local pairedA, pairedB = other.player, player
 			table.remove(queue, #queue)
 			table.remove(queue, i)
-			start({ player = other.player }, { player = player }, mode)
+			if not start({ player = pairedA }, { player = pairedB }, mode) then
+				-- No arena. Put them back rather than dropping them into
+				-- nothing, and let the next tick try again.
+				table.insert(queue, { player = pairedA, mode = mode, since = os.clock() })
+				table.insert(queue, { player = pairedB, mode = mode, since = os.clock() })
+			end
 			return
 		end
 	end
@@ -93,6 +161,9 @@ function MatchmakingService.playerLeaving(player: Player)
 	MatchmakingService.cancel(player)
 	local m = MatchmakingService.matchFor(player)
 	if m then m:playerLeft(player) end
+	-- Before the match settles, not after: cleanup must never wait on somebody
+	-- who has already gone.
+	ArenaService.forgetPlayer(player)
 end
 
 -- A forfeit names its match for the same reason a lock does: one still in
@@ -131,8 +202,11 @@ function MatchmakingService.step(dt: number)
 		-- a "private" room that silently seats a bot instead of the friend you
 		-- are waiting for is worse than an empty queue.
 		elseif entry.mode == Enums.Mode.Quick and now - entry.since >= Tuning.BOT_AFTER then
+			local waiting = entry.player
 			table.remove(queue, i)
-			start({ player = entry.player }, { bot = botFor(entry.player) }, entry.mode)
+			if not start({ player = waiting }, { bot = botFor(waiting) }, entry.mode) then
+				table.insert(queue, { player = waiting, mode = entry.mode, since = now })
+			end
 		else
 			i += 1
 		end

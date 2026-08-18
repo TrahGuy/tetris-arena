@@ -17,6 +17,7 @@ local Stats = require(Services.StatsService)
 local Practice = require(Services.PracticeService)
 local Museum = require(Services.MuseumService)
 local PuzzleService = require(Services.PuzzleService)
+local ArenaService = require(Services.ArenaService)
 
 Matchmaking.setStatsService(Stats)
 
@@ -28,6 +29,14 @@ do
 		warn(("[Museum] %d catalog skins have no exhibit in the world"):format(missing))
 	end
 	print(("[BlockArena] museum: %d exhibits wired"):format(wired))
+end
+
+-- The battle dimension. Proves the arena builder produces usable geometry
+-- before any match depends on it; a malformed one disables arenas rather than
+-- starting matches nobody can play.
+do
+	local ok = ArenaService.init()
+	print(("[BlockArena] battle dimension: %s"):format(ok and "ready" or "DISABLED"))
 end
 
 -- The secret nook. Discovers the unfinished board Phase 1 built and hangs
@@ -217,6 +226,8 @@ Players.PlayerRemoving:Connect(function(player)
 	-- A solver who disconnects must not leave the nook reserved, or its blocks
 	-- stuck in the wall.
 	Puzzle:playerLeaving(player)
+	-- And an arena must never wait on somebody who has already gone.
+	ArenaService.forgetPlayer(player)
 	for _, limiter in pairs(limits) do
 		limiter:forget(player)
 	end
@@ -263,6 +274,8 @@ task.spawn(function()
 		debugFolder:SetAttribute("Matchmaking", Matchmaking.debugSummary())
 		debugFolder:SetAttribute("Players", #Players:GetPlayers())
 		-- Attributes rather than prints: this loop ticks twice a second.
+		ArenaService.step()
+		debugFolder:SetAttribute("Arenas", ArenaService.debugSummary())
 		debugFolder:SetAttribute("Solo", Practice.debugSummary(workspace:GetServerTimeNow()))
 		local q = Puzzle:status(os.clock())
 		debugFolder:SetAttribute("PuzzleStatus", q.status)

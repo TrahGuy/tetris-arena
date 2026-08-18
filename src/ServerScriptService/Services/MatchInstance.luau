@@ -51,6 +51,8 @@ local function makeSide(spec: any, seed: number)
 		-- spec.name lets a side exist without a Player behind it, which is what
 		-- makes a two-player match testable without two clients.
 		name = spec.name or (spec.player and spec.player.DisplayName) or nil,
+		-- Cosmetic, for the opponent's VS card. Nothing reads it again.
+		titleName = spec.titleName,
 		alive = true,
 		left = false,
 		lastIndex = 0,
@@ -101,6 +103,9 @@ function MatchInstance.new(id: number, specA: any, specB: any, opts: any?)
 				seed = seed,
 				mode = self.mode,
 				opponent = side.other.name,
+				-- Presentation for the VS card, set by Matchmaking before the
+				-- match starts. Cosmetic: nothing downstream reads it.
+				opponentTitle = side.other.titleName,
 				isBot = side.other.isBot == true,
 				gravity = Tuning.GRAVITY,
 			})

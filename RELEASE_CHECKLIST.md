@@ -29,6 +29,26 @@ skipped, so they are called out.
       player wins **(needs 2 clients)**
 - [ ] Queue cancel leaves no ghost entry in any mode
 
+## Battle dimension
+
+- [ ] Output says `battle dimension: ready` at startup
+- [ ] A match moves both players out of the lobby and into an arena
+      **(needs 2 clients)**
+- [ ] Each player lands on their own pad, facing the middle **(needs 2 clients)**
+- [ ] MATCH FOUND → VS → fade plays over the move, and the VS card names the
+      opponent's equipped title
+- [ ] The result stays readable in the arena, then RETURNING TO LOBBY covers the
+      trip back
+- [ ] Both players end up where they were standing before the match
+      **(needs 2 clients)**
+- [ ] Two matches at once get different arenas and cannot see each other
+      **(needs 2 clients)**
+- [ ] `Workspace.MatchDimensions` is empty once every match has settled
+- [ ] A player who disconnects mid-match does not hold an arena open
+- [ ] Falling off the platform puts the character back on their pad
+- [ ] A respawn during a match returns the character to the arena, not the lobby
+- [ ] `ServerStorage.Debug.Arenas` reads `idle` when nothing is running
+
 ## Solo
 
 - [ ] Sprint: 40 lines, timer, best time saved, restarting spends the old session

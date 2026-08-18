@@ -118,6 +118,17 @@ Linked rewards: QUAD MACHINE grants `golden`, ELITE grants `diamond`, through `S
 Evaluation is event-driven (load, match result, Sprint record, Blitz record, secret solve) and batched into one profile push. Titles are never auto-equipped.
 No remote grants a title or completes an achievement; `EquipTitle` is a request the server validates. Titles never enter a gameplay packet.
 
+## Battle dimension
+
+One arena per running match, built in code by `ArenaService`, in the same place and the same server. No `TeleportService`, no second place, no reserved server.
+Origin (0, 5000, 0); 12 slots, 1200 studs apart on x. Slot exhaustion refuses the match and re-queues both players — it never starts a match with nowhere to put it.
+Everything is keyed by `matchId`. A release or a return naming a finished match cannot touch the match now in that slot.
+`Matchmaking.start` allocates before constructing the match and returns nil on failure. Both call sites put the players back in the queue.
+Enter on countdown; return `RETURN_AFTER` (2.5 s) after the result; release at `RESULTS_TIME`. A disconnect calls `forgetPlayer` immediately — cleanup never waits on somebody who has gone.
+Destinations are server-built markers only. No remote accepts a position, a slot or an arena id from a client.
+A malformed template disables arenas and matches run in the lobby. Degrading is mandatory: scenery must never take the game down.
+`ArenaService` owns geometry and character position, nothing else. No rating, score, skin, title, board, DataStore or `Lighting` access.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

@@ -22,7 +22,7 @@
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
 	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring, LockValidation,
-	TitleData
+	TitleData, ArenaService
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -2578,6 +2578,21 @@ function T.titleSecretTransaction()
 		not Stats.hasSolvedSecret(other))
 end
 
+-- Source with the comment lines taken out.
+--
+-- Several modules say out loud in their header what they deliberately do NOT
+-- touch, so a raw substring scan over the whole file trips over the
+-- documentation. These checks are about the code.
+local function codeOf(module: Instance): string
+	local kept = {}
+	for line in (module :: any).Source:gmatch("[^\n]*") do
+		if not line:match("^%s*%-%-") then
+			table.insert(kept, line)
+		end
+	end
+	return table.concat(kept, "\n")
+end
+
 -- Titles are cosmetic. This is the assertion that says so.
 function T.titlesAreCosmetic()
 	local source = game:GetService("ReplicatedStorage").Shared
@@ -2587,9 +2602,22 @@ function T.titlesAreCosmetic()
 			src ~= nil and src.Source:find("[Tt]itle") == nil)
 	end
 	local match = game:GetService("ServerScriptService").Services.MatchInstance.Source
-	-- The result card carries one, and nothing else in the match does.
-	local _, mentions = match:gsub("title", "")
-	check("cosmetic: MatchInstance mentions a title only on the result", mentions <= 3, tostring(mentions))
+	-- A title reaches the match in exactly three places, all of them
+	-- presentation: what a side is called, what the VS card shows the other
+	-- side, and what the result card prints. Counting mentions would only
+	-- measure how chatty the comments are, so name them instead.
+	local allowed = { titleName = true, opponentTitle = true, title = true }
+	local unknown = {}
+	for line in codeOf(game:GetService("ServerScriptService").Services.MatchInstance):gmatch("[^\n]+") do
+		if line:find("[Tt]itle") then
+			local key = line:match("([%a_]+)%s*=")
+			if not (key and allowed[key]) then
+				table.insert(unknown, (line:gsub("^%s+", "")))
+			end
+		end
+	end
+	check("cosmetic: a title reaches the match only as presentation",
+		#unknown == 0, unknown[1])
 	check("cosmetic: no title appears in a lock, snapshot or garbage message",
 		match:find("titleId") == nil)
 
@@ -2600,6 +2628,248 @@ function T.titlesAreCosmetic()
 		check("cosmetic: there is no " .. forbidden .. " remote",
 			folder:FindFirstChild(forbidden) == nil)
 	end
+end
+
+-- == Battle dimension (Phase 18) ==========================================
+
+-- A player-shaped table with a character the service can actually move.
+local function arenaPlayer(id: number, name: string, at: Vector3)
+	local char = Instance.new("Model")
+	char.Name = name
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Anchored = true
+	root.Size = Vector3.new(2, 2, 1)
+	root.CFrame = CFrame.new(at)
+	root.Parent = char
+	char.PrimaryPart = root
+	char.Parent = workspace
+	return { UserId = id, Name = name, DisplayName = name, Character = char,
+		Parent = workspace, _char = char }
+end
+
+-- A clean, initialised service.
+--
+-- Tests are run over MCP, which keeps a require cache of its own: the module
+-- table here is not the one Bootstrap called init() on. Calling it is also what
+-- makes the slot assertions below deterministic, because it drops every arena
+-- left over from an earlier test.
+local function freshArena(): boolean
+	local ok = ArenaService.init()
+	return ok
+end
+
+function T.arenaTemplate()
+	check("arena: the builder produced usable geometry", freshArena())
+	check("arena: MatchDimensions exists", workspace:FindFirstChild("MatchDimensions") ~= nil)
+	eq("arena: and starts empty", ArenaService.activeCount(), 0)
+
+	-- What a built arena has to contain for a match to be playable in it.
+	local a = ArenaService.allocate(90001, Enums.Mode.Quick)
+	check("arena: allocation returns a handle", a ~= nil)
+	check("arena: with both spawns", a.spawns.A ~= nil and a.spawns.B ~= nil)
+	check("arena: which are parts", a.spawns.A:IsA("BasePart") and a.spawns.B:IsA("BasePart"))
+	check("arena: and are not the same place",
+		(a.spawns.A.Position - a.spawns.B.Position).Magnitude > 1)
+	check("arena: the model carries its match", a.model:GetAttribute("MatchId") == 90001)
+	eq("arena: and its mode", a.model:GetAttribute("Mode"), Enums.Mode.Quick)
+	check("arena: and a slot", type(a.model:GetAttribute("SlotIndex")) == "number")
+	check("arena: it has geometry", a.model:FindFirstChild("Geometry") ~= nil)
+	check("arena: and bounds to stand on", a.model:FindFirstChild("Bounds") ~= nil)
+
+	-- Well above the lobby, which tops out around a hundred studs.
+	check("arena: it is nowhere near the lobby", a.spawns.A.Position.Y > 1000)
+
+	check("arena: allocating the same match twice returns the same arena",
+		ArenaService.allocate(90001, Enums.Mode.Quick) == a)
+	ArenaService.release(90001)
+	check("arena: releasing removes the model", a.model.Parent == nil)
+	eq("arena: and nothing is left active", ArenaService.activeCount(), 0)
+end
+
+function T.arenaSlots()
+	freshArena()
+	local a = ArenaService.allocate(90011, Enums.Mode.Quick)
+	local b = ArenaService.allocate(90012, Enums.Mode.Ranked)
+	check("slots: two matches both got an arena", a ~= nil and b ~= nil)
+	check("slots: on different slots", a.slot ~= b.slot)
+	check("slots: and far enough apart to be private",
+		(a.centre - b.centre).Magnitude >= ArenaService.SLOT_SPACING)
+	eq("slots: each carries its own mode", b.model:GetAttribute("Mode"), Enums.Mode.Ranked)
+
+	local firstSlot = a.slot
+	ArenaService.release(90011)
+	check("slots: releasing one leaves the other alone", b.model.Parent ~= nil)
+	check("slots: which is still allocated", ArenaService.arenaFor(90012) ~= nil)
+
+	local c = ArenaService.allocate(90013, Enums.Mode.Private)
+	eq("slots: the freed slot is reused", c.slot, firstSlot)
+	check("slots: without disturbing the survivor", ArenaService.arenaFor(90012) ~= nil)
+
+	-- The whole point of keying by match rather than slot.
+	ArenaService.release(90011)
+	check("slots: releasing the finished match again is harmless",
+		ArenaService.arenaFor(90013) ~= nil)
+	check("slots: and cannot destroy whatever took its slot", c.model.Parent ~= nil)
+	check("slots: releasing a match that never existed is safe",
+		ArenaService.release(4242) == false)
+
+	ArenaService.release(90012)
+	ArenaService.release(90013)
+	eq("slots: everything cleaned up", ArenaService.activeCount(), 0)
+	eq("slots: and no arena models are left behind",
+		#workspace.MatchDimensions:GetChildren(), 0)
+end
+
+function T.arenaPlayers()
+	freshArena()
+	local home = CFrame.new(120, 5, -40)
+	local p1 = arenaPlayer(-701, "SideA", home.Position)
+	local p2 = arenaPlayer(-702, "SideB", Vector3.new(-60, 5, 30))
+	local a = ArenaService.allocate(90021, Enums.Mode.Quick)
+
+	check("players: A enters", ArenaService.enter(90021, p1, "A"))
+	check("players: B enters", ArenaService.enter(90021, p2, "B"))
+	check("players: A stands on side A",
+		(p1._char:GetPivot().Position - a.spawns.A.Position).Magnitude < 1)
+	check("players: B stands on side B",
+		(p2._char:GetPivot().Position - a.spawns.B.Position).Magnitude < 1)
+	check("players: they are not in the same place",
+		(p1._char:GetPivot().Position - p2._char:GetPivot().Position).Magnitude > 1)
+	eq("players: the service knows where A is", ArenaService.matchOf(p1), 90021)
+
+	-- Entering a match that does not exist, or a side that does not.
+	check("players: entering an unknown match fails",
+		not ArenaService.enter(4242, p1, "A"))
+	check("players: entering an unknown side fails",
+		not ArenaService.enter(90021, p1, "Z"))
+
+	-- Going home.
+	check("players: A returns", ArenaService.returnPlayer(90021, p1))
+	check("players: to where they were standing",
+		(p1._char:GetPivot().Position - home.Position).Magnitude < 1)
+	check("players: returning twice is harmless", not ArenaService.returnPlayer(90021, p1))
+	check("players: B is still in the arena", ArenaService.matchOf(p2) == 90021)
+
+	-- A stale call naming another match must not move somebody.
+	local other = ArenaService.allocate(90022, Enums.Mode.Quick)
+	check("players: a second arena exists to name", other ~= nil and other.slot ~= a.slot)
+	local before = p2._char:GetPivot().Position
+	check("players: a stale match cannot return someone else's player",
+		not ArenaService.returnPlayer(90022, p2))
+	check("players: who has not moved",
+		(p2._char:GetPivot().Position - before).Magnitude < 0.01)
+
+	-- Releasing sends whoever is left home.
+	ArenaService.release(90021)
+	check("players: release returned B to the lobby", p2._char:GetPivot().Position.Y < 1000)
+	eq("players: and nobody is assigned", ArenaService.matchOf(p2), nil)
+
+	-- A player who leaves stops being the arena's problem.
+	ArenaService.enter(90022, p1, "A")
+	ArenaService.forgetPlayer(p1)
+	eq("players: forgetting drops the assignment", ArenaService.matchOf(p1), nil)
+	check("players: and release still works afterwards", ArenaService.release(90022))
+
+	p1._char:Destroy()
+	p2._char:Destroy()
+	eq("players: nothing left behind", ArenaService.activeCount(), 0)
+end
+
+-- Falling out, or arriving in a fresh character, puts a player back on the pad.
+function T.arenaRecovery()
+	freshArena()
+	local p = arenaPlayer(-703, "Faller", Vector3.new(10, 5, 10))
+	local a = ArenaService.allocate(90031, Enums.Mode.Quick)
+	ArenaService.enter(90031, p, "A")
+
+	p._char:PivotTo(CFrame.new(a.spawns.A.Position - Vector3.new(0, 400, 0)))
+	ArenaService.step()
+	check("recovery: a fallen character is put back on their pad",
+		(p._char:GetPivot().Position - a.spawns.A.Position).Magnitude < 1)
+
+	-- A small wobble is not a fall.
+	p._char:PivotTo(CFrame.new(a.spawns.A.Position + Vector3.new(3, 0, 3)))
+	ArenaService.step()
+	check("recovery: standing slightly off the marker is left alone",
+		(p._char:GetPivot().Position - a.spawns.A.Position).Magnitude > 1)
+
+	check("recovery: stepping with nobody assigned is safe",
+		(pcall(ArenaService.step)))
+	ArenaService.release(90031)
+	p._char:Destroy()
+end
+
+-- A malformed template disables arenas. Matches must still start.
+--
+-- The alternative -- refusing to start a match because the scenery would not
+-- build -- turns a cosmetic failure into an outage, and the lobby match is
+-- exactly what every phase before this one shipped.
+function T.arenaDegraded()
+	freshArena()
+	ArenaService.disableForTest()
+	check("degraded: the service says so", not ArenaService.isEnabled())
+
+	local a, why = ArenaService.allocate(90041, Enums.Mode.Quick)
+	check("degraded: allocation fails", a == nil)
+	eq("degraded: and says why", why, "arena disabled")
+	eq("degraded: nothing is active", ArenaService.activeCount(), 0)
+	eq("degraded: and no models exist", #workspace.MatchDimensions:GetChildren(), 0)
+
+	-- Every other entry point has to survive being called anyway, because the
+	-- callers do not branch on this.
+	local p = arenaPlayer(-704, "Stranded", Vector3.new(5, 5, 5))
+	check("degraded: entering fails quietly", not ArenaService.enter(90041, p, "A"))
+	check("degraded: returning fails quietly", not ArenaService.returnPlayer(90041, p))
+	check("degraded: releasing fails quietly", not ArenaService.release(90041))
+	check("degraded: stepping is safe", (pcall(ArenaService.step)))
+	check("degraded: forgetting is safe", (pcall(ArenaService.forgetPlayer, p)))
+	eq("degraded: nobody is in an arena", ArenaService.matchOf(p), nil)
+	check("degraded: the player did not move",
+		(p._char:GetPivot().Position - Vector3.new(5, 5, 5)).Magnitude < 0.01)
+	eq("degraded: the debug line says disabled", ArenaService.debugSummary(), "disabled")
+
+	-- And the matchmaker only refuses to start a match when arenas are meant to
+	-- work and did not. A disabled service is not a reason to stop the game.
+	local mm = codeOf(game:GetService("ServerScriptService").Services.MatchmakingService)
+	check("degraded: matchmaking checks isEnabled before refusing",
+		mm:find("not arena and ArenaService.isEnabled()", 1, true) ~= nil)
+	check("degraded: and a failed start puts the players back in the queue",
+		mm:find("if not start(", 1, true) ~= nil)
+
+	check("degraded: init brings it back", freshArena())
+	check("degraded: and allocation works again",
+		ArenaService.allocate(90042, Enums.Mode.Quick) ~= nil)
+	ArenaService.release(90042)
+	p._char:Destroy()
+end
+
+-- The arena owns geometry and nothing else.
+function T.arenaOwnsNothingElse()
+	local code = codeOf(game:GetService("ServerScriptService").Services.ArenaService)
+	for _, forbidden in ipairs({ "rating", "peakRating", "Elo", "bestBlitz",
+		"bestSprint", "ownedSkins", "ownedTitles", "secretPuzzleSolved", "score",
+		"Attack", "attack", "garbage", "StatsService", "Board", "TeleportService",
+		"Lighting", "DataStore" }) do
+		check("arena owns nothing else: the code never mentions " .. forbidden,
+			code:find(forbidden, 1, true) == nil)
+	end
+
+	-- A client that could name its own destination could stand in someone
+	-- else's match, so no remote may exist for it.
+	local folder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+	check("arena owns nothing else: the remotes folder is there", folder ~= nil)
+	for _, forbidden in ipairs({ "TeleportToArena", "ReturnToLobby", "SetArenaCFrame",
+		"EnterArena", "ArenaTransition", "ArenaRequest" }) do
+		check("arena owns nothing else: there is no " .. forbidden .. " remote",
+			folder:FindFirstChild(forbidden) == nil)
+	end
+	check("arena owns nothing else: it listens to no remote at all",
+		code:find("OnServerEvent") == nil and code:find("Remotes") == nil)
+
+	-- The comment scan is only worth anything if it kept the code.
+	check("arena owns nothing else: the scan actually read the module",
+		code:find("ArenaService.allocate") ~= nil)
 end
 
 -- Human vs human, without two clients.
@@ -2747,6 +3017,7 @@ function T.run(root: Instance?, services: Instance?)
 	BlitzScoring = require((root :: any).BlitzScoring)
 	LockValidation = require((root :: any).LockValidation)
 	TitleData = require((root :: any).TitleData)
+	ArenaService = require((services :: any).ArenaService)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
 	SkinData = require((root :: any).SkinData)
@@ -2766,6 +3037,8 @@ function T.run(root: Instance?, services: Instance?)
 		"sharedValidator",
 		"titleCatalog", "titleRequirements", "titleProfile", "titleMigration",
 		"titleAchievements", "titleSecretTransaction", "titlesAreCosmetic",
+		"arenaTemplate", "arenaSlots", "arenaPlayers", "arenaRecovery",
+		"arenaDegraded", "arenaOwnsNothingElse",
 		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])

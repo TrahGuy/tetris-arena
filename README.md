@@ -37,6 +37,7 @@ open at that path). Move it in here when convenient.
 | 15 — Blitz mode | done |
 | 16 — Release hardening | done — see [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) |
 | 17 — Player titles and achievements | done |
+| 18 — Battle dimension and match transitions | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -390,9 +391,61 @@ at 0.9 ms on a messy board and 2.9 ms on an empty one — it was measured rather
 than guessed, and left alone, because changing it would risk the competitive
 validation Phases 10 and 11 exist to guarantee.
 
+## The battle dimension
+
+A match used to happen while both players stood in the lobby, so the most
+important thing the game does looked like the least. Now the two of them leave.
+
+`ArenaService` builds one private arena per running match, 5000 studs above the
+hall, and the server moves both characters into it. When the match settles it
+puts them back exactly where they were standing and takes the arena away.
+
+- **Same place, same server.** No `TeleportService`, no second place id, no
+  reserved server. A transition that can fail to come back is worse than no
+  transition, and a second place would split the player count that makes
+  matchmaking work at all.
+- **The board is still the `ScreenGui`.** Nothing about the sim, the authority
+  model or the network moved into 3D. The arena is where you are standing while
+  you play, not what you are playing.
+- **Twelve slots**, 1200 studs apart on the x axis, far enough that no match can
+  see or hear another. Slot 13 is refused and the match does not start; the
+  players go back in the queue rather than into a countdown for a match with
+  nowhere to happen.
+- **Keyed by `matchId`, never by slot.** A release from a match that ended ten
+  seconds ago cannot tear down the match now standing in the same slot, and a
+  stale `returnPlayer` cannot pull somebody out of the match they are in now.
+  Same rule Phase 10 applies to every competitive message, same reason.
+- **Built in code**, like the museum pads, the puzzle prompts and the Blitz pad.
+  A live server picks it up without the `.rbxl` being edited and the source of
+  truth stays in the repository where it can be diffed.
+
+The template is proved at startup: `init()` builds a probe, checks it has two
+spawn markers in different places, and reports. A malformed template **disables
+arenas and matches keep running in the lobby** — the degraded path is what every
+phase before this one shipped, and a scenery failure must not become an outage.
+
+Per arena: 41 parts, 2 lights, 0 particle emitters, 2 `SurfaceGui`s. Build
+1.2 ms, release 0.4 ms; all twelve cost 14.5 ms and 492 parts. Sixty
+allocate/release cycles leave nothing behind.
+
+Accents follow the mode — Quick cyan/violet, Ranked magenta/red, Private
+gold/violet — so a screenshot says which queue it came from.
+
+`ArenaService` knows about geometry and where a character is standing, and about
+nothing else. It never touches a rating, a score, a skin, a title or a board,
+there is no remote a client can use to name its own destination, and the tests
+assert all of that against the module's own source.
+
+### What the player sees
+
+MATCH FOUND with the mode, then VS with the opponent's name and equipped title,
+then a fade — about a second and a half in total, over the top of the move.
+After the result, RETURNING TO LOBBY covers the trip back. Short on purpose:
+somebody queueing ten times an evening should never learn to dread it.
+
 ## Tests
 
-660 assertions. **Run them in Play mode, from the Server datamodel:**
+1002 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()

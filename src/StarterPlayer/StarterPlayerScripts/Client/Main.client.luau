@@ -339,6 +339,26 @@ end
 
 Remotes.MatchUpdate.OnClientEvent:Connect(function(msg)
 	if msg.state == Enums.State.Countdown then
+		-- The server has already moved us into the arena by the time this
+		-- arrives. The overlay covers the move and names who we are facing.
+		local modeLabel = ({
+			[Enums.Mode.Quick] = "QUICK MATCH",
+			[Enums.Mode.Ranked] = "RANKED",
+			[Enums.Mode.Private] = "PRIVATE ROOM",
+		})[msg.mode] or "MATCH"
+		ui:transition("MATCH FOUND", modeLabel, Theme.C.cy)
+		SoundKit.play("queue")
+		task.delay(0.7, function()
+			if state ~= Enums.State.Countdown then return end
+			local them = msg.opponent or "OPPONENT"
+			ui:transition("VS", ("%s%s"):format(
+				msg.opponentTitle and (msg.opponentTitle .. "   ·   ") or "", them), Theme.C.mg)
+		end)
+		task.delay(1.5, function()
+			if state == Enums.State.Countdown or state == Enums.State.Playing then
+				ui:transition(nil)
+			end
+		end)
 		startSim(msg.seed, { gravity = msg.gravity }, {
 			networked = true,
 			matchId = msg.matchId,
@@ -424,6 +444,14 @@ end)
 Remotes.Result.OnClientEvent:Connect(function(payload)
 	if matchInfo and matchInfo.networked and payload.matchId ~= matchInfo.matchId then return end
 	if input then input:disable() end
+	-- The arena stays up for a moment so the result lands somewhere, then the
+	-- server puts us back and this says why the floor changed.
+	task.delay(2.0, function()
+		if state == Enums.State.Results then
+			ui:transition("RETURNING TO LOBBY", nil, Theme.C.muted)
+			task.delay(1.1, function() ui:transition(nil) end)
+		end
+	end)
 	if fx then fx:onKo(payload.outcome == Enums.Result.Win) end
 	SoundKit.setMusic("musicLobby")
 	local stats = payload.stats or {}

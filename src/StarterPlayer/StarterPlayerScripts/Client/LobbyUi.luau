@@ -548,6 +548,62 @@ function LobbyUi:_select(button: Instance?)
 	end
 end
 
+-- The moment between the lobby and the arena.
+--
+-- Deliberately short and screen-based: two lines over a fade, no camera moves,
+-- nothing to sit through. A player who queues ten times an evening should never
+-- learn to dread this.
+function LobbyUi:transition(title: string?, sub: string?, colour: Color3?)
+	if not self.transitionCard then
+		local screenFade = Instance.new("Frame")
+		screenFade.Name = "Transition"
+		screenFade.BackgroundColor3 = Theme.C.bg
+		screenFade.BackgroundTransparency = 1
+		screenFade.BorderSizePixel = 0
+		screenFade.Size = UDim2.fromScale(1, 1)
+		screenFade.ZIndex = 40
+		screenFade.Visible = false
+		screenFade.Parent = self.chrome.Parent
+		self.transitionTitle = Theme.label(screenFade, "", {
+			Font = Theme.F.display, TextSize = 46, TextColor3 = Theme.C.cy,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.47), Size = UDim2.fromOffset(700, 56),
+			ZIndex = 41,
+		})
+		self.transitionSub = Theme.label(screenFade, "", {
+			TextColor3 = Theme.C.muted, TextSize = 16,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.55), Size = UDim2.fromOffset(700, 24),
+			ZIndex = 41,
+		})
+		self.transitionCard = screenFade
+	end
+
+	self.transitionSeq = (self.transitionSeq or 0) + 1
+	local mine = self.transitionSeq
+	if not title then
+		-- Fade out rather than snapping: the arena is already there behind it.
+		TweenService:Create(self.transitionCard, TweenInfo.new(0.35), {
+			BackgroundTransparency = 1 }):Play()
+		TweenService:Create(self.transitionTitle, TweenInfo.new(0.25), { TextTransparency = 1 }):Play()
+		TweenService:Create(self.transitionSub, TweenInfo.new(0.25), { TextTransparency = 1 }):Play()
+		task.delay(0.4, function()
+			if self.transitionSeq == mine and self.transitionCard then
+				self.transitionCard.Visible = false
+			end
+		end)
+		return
+	end
+
+	self.transitionTitle.Text = title
+	self.transitionTitle.TextColor3 = colour or Theme.C.cy
+	self.transitionTitle.TextTransparency = 0
+	self.transitionSub.Text = sub or ""
+	self.transitionSub.TextTransparency = 0
+	self.transitionCard.BackgroundTransparency = 0.15
+	self.transitionCard.Visible = true
+end
+
 function LobbyUi:showQueue(on: boolean)
 	self.queue.Visible = on
 	self.chrome.Visible = not on
