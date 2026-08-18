@@ -36,6 +36,15 @@ Tuning.MATCH_CAP = 300       -- hard stop; most garbage sent wins
 Tuning.RESULTS_TIME = 12
 Tuning.BOT_AFTER = 20        -- queue this long with no human -> offer a bot
 
+-- ── Practice ──────────────────────────────────────────────────────────────
+Tuning.SPRINT_GOAL = 40      -- lines in a sprint; the server vets records against it
+-- Sustained placement rate no human reaches. MIN_LOCK_INTERVAL below is a
+-- per-lock guard and has to tolerate bursts, so it sits at 33/s; this one is an
+-- average over a whole run and can be far tighter. The sprint record floor
+-- falls out of it: 40 lines is 400 cells, a piece is 4 of them, so a sprint
+-- needs 100 pieces and therefore at least eight real seconds.
+Tuning.MAX_PPS = 12
+
 -- ── Networking ────────────────────────────────────────────────────────────
 Tuning.SNAPSHOT_HZ = 10
 Tuning.MIN_LOCK_INTERVAL = 0.03 -- anything faster than this is not a human

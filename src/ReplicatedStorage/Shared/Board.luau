@@ -52,6 +52,7 @@ function Board.new(seed: number, opts: any?)
 	self.grounded = false
 	self.spawnDelay = 0
 	self.lastKick = false -- last successful action was a rotation
+	self.lastSpin = nil  -- the rotation itself, for the server to replay
 	self.combo = 0
 	self.b2b = false
 	self.incoming = {}
@@ -110,6 +111,7 @@ function Board:spawn(kind: number?): boolean
 	self.holdUsed = false
 	self.gravityAcc, self.lockTimer, self.lockResets, self.grounded = 0, 0, 0, false
 	self.lastKick = false
+	self.lastSpin = nil
 
 	if self:collides(kind, 1, sp.x, sp.y) then
 		self.piece = nil
@@ -138,6 +140,7 @@ function Board:move(dx: number): boolean
 	if self:collides(p.kind, p.rot, p.x + dx, p.y) then return false end
 	p.x += dx
 	self.lastKick = false
+	self.lastSpin = nil
 	self:touchLock()
 	return true
 end
@@ -145,14 +148,56 @@ end
 function Board:rotate(dir: number): boolean
 	local p = self.piece
 	if not p or not self.alive then return false end
+	local fromRot, fromX, fromY = p.rot, p.x, p.y
 	local to = SRS.turn(p.rot, dir)
 	for _, k in ipairs(SRS.kicks(p.kind, p.rot, to)) do
 		local nx, ny = p.x + k[1], p.y + k[2]
 		if not self:collides(p.kind, to, nx, ny) then
 			p.rot, p.x, p.y = to, nx, ny
 			self.lastKick = true
+			-- Where the piece was before this rotation. The server never runs
+			-- the player's rotations, so this travels with the lock and is
+			-- replayed there against the server's own cells — see verifySpin.
+			self.lastSpin = { rot = fromRot, x = fromX, y = fromY, dir = dir }
 			self:touchLock()
 			return true
+		end
+	end
+	return false
+end
+
+-- Could this placement have been reached by the rotation described in `spin`?
+--
+-- The shadow board is advanced by reported placements, never by the player's
+-- inputs, so it cannot observe that the last action was a rotation — and a
+-- T-spin is defined by exactly that. What the server can do is replay the
+-- claimed rotation on its own cells: the piece must have fitted where the
+-- client says it was, that position must be one the piece could actually have
+-- got to, and the SRS kick table applied from there must land precisely here.
+--
+-- This is a witness the server checks, not a claim it believes. Nothing about
+-- the spin — full or mini, the lines, the attack — is taken from the client; a
+-- verified witness only sets the same `lastKick` flag the player's own rotation
+-- would have set, and detection proceeds from the server's board as usual. A
+-- forged witness that fails any step buys nothing, and one that passes
+-- describes a rotation the player could legitimately have performed.
+function Board:verifySpin(kind: number, rot: number, x: number, y: number, spin: any): boolean
+	if type(spin) ~= "table" then return false end
+	local fromRot, fromX, fromY, dir =
+		tonumber(spin.rot), tonumber(spin.x), tonumber(spin.y), tonumber(spin.dir)
+	if not (fromRot and fromX and fromY and dir) then return false end
+	if fromRot % 1 ~= 0 or fromX % 1 ~= 0 or fromY % 1 ~= 0 then return false end
+	if fromRot < 1 or fromRot > 4 then return false end
+	if dir ~= 1 and dir ~= -1 then return false end
+	if SRS.turn(fromRot, dir) ~= rot then return false end
+	-- The piece has to have fitted where it says it was standing.
+	if self:collides(kind, fromRot, fromX, fromY) then return false end
+	for _, k in ipairs(SRS.kicks(kind, fromRot, rot)) do
+		local nx, ny = fromX + k[1], fromY + k[2]
+		if not self:collides(kind, rot, nx, ny) then
+			-- SRS takes the first offset that fits, so the landing square is
+			-- forced: either it is the one claimed or the claim is false.
+			return nx == x and ny == y and self:reachable(kind, fromRot, fromX, fromY)
 		end
 	end
 	return false
@@ -164,6 +209,7 @@ function Board:stepDown(): boolean
 	if self:collides(p.kind, p.rot, p.x, p.y - 1) then return false end
 	p.y -= 1
 	self.lastKick = false
+	self.lastSpin = nil
 	return true
 end
 
@@ -267,7 +313,11 @@ function Board:lock()
 	-- never have to reconstruct it — the server validates against this, and
 	-- guessing it from the piece state one step earlier is off by a row
 	-- whenever gravity moved the piece during the same tick.
-	local placed = { kind = p.kind, rot = p.rot, x = p.x, y = p.y }
+	-- `spin` is the rotation that put it here, when a rotation is what put it
+	-- here. The server replays it to reach the same T-spin verdict on its own
+	-- board; it is evidence, not a result.
+	local placed = { kind = p.kind, rot = p.rot, x = p.x, y = p.y,
+		spin = self.lastKick and self.lastSpin or nil }
 	local shape = Pieces.SHAPES[p.kind][p.rot]
 	local lowest = math.huge
 	for i = 1, 4 do

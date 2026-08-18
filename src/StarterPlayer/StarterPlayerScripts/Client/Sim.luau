@@ -94,6 +94,10 @@ function Sim:update(dt: number)
 						rot = place.rot,
 						x = place.x,
 						y = place.y,
+						-- The rotation that placed it, for the server to replay.
+						-- `info` and `send` are this client's own reading and go
+						-- no further than the local HUD and FX.
+						spin = place.spin,
 						info = e.data.info,
 						send = e.data.send,
 					})

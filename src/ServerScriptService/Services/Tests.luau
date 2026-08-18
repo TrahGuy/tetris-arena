@@ -20,7 +20,7 @@
 -- builds a fresh datamodel, so everything there is current by construction.
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
-local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats
+local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -47,6 +47,64 @@ local function fillRow(b, row: number, ...)
 			b.cells[(row - 1) * b.w + col] = Pieces.GARBAGE
 		end
 	end
+end
+
+local function cell(b, col: number, row: number)
+	b.cells[(row - 1) * b.w + col] = Pieces.GARBAGE
+end
+
+-- A board with nothing on it and nothing in play, so a placement can be set up
+-- exactly. Board.new spawns off the bag, which is never what a spin test is
+-- about.
+local function emptyBoard(seed: number)
+	local b = Board.new(seed)
+	b.piece = nil
+	for i = 1, b.w * b.h do b.cells[i] = 0 end
+	return b
+end
+
+-- The four spins, as geometry plus the square the piece turns from.
+--
+-- These were not written out by hand. Each one came from an exhaustive search
+-- over the SRS kick tables for a rotation that lands on the placement, clears
+-- the stated rows, and starts from a square the piece can actually reach — so
+-- they are placements the rotation system genuinely produces rather than ones
+-- that look right on paper. The triple is the classic (-1,-2) kick down a
+-- capped column.
+local SPINS = {
+	single = {
+		build = function(b) fillRow(b, 1, 5); cell(b, 4, 3) end,
+		pre = { rot = 2, x = 3, y = 1, dir = 1 },
+		land = { rot = 3, x = 3, y = 1 }, class = "full", lines = 1,
+	},
+	double = {
+		build = function(b) fillRow(b, 1, 5); fillRow(b, 2, 4, 5, 6); cell(b, 4, 3) end,
+		pre = { rot = 2, x = 3, y = 1, dir = 1 },
+		land = { rot = 3, x = 3, y = 1 }, class = "full", lines = 2,
+	},
+	triple = {
+		build = function(b)
+			fillRow(b, 1, 4); fillRow(b, 2, 4, 5); fillRow(b, 3, 4)
+			fillRow(b, 5, 5, 6); fillRow(b, 6, 5, 6)
+		end,
+		pre = { rot = 1, x = 3, y = 3, dir = 1 },
+		land = { rot = 2, x = 2, y = 1 }, class = "full", lines = 3,
+	},
+	mini = {
+		build = function(b) fillRow(b, 1, 4); fillRow(b, 2, 4); fillRow(b, 4, 4, 5) end,
+		pre = { rot = 1, x = 2, y = 2, dir = 1 },
+		land = { rot = 2, x = 2, y = 2 }, class = "mini", lines = 1,
+	},
+}
+
+-- Build the cells, stand the piece on the square it turns from, and turn it —
+-- so detection sees exactly what a player's last action would have left behind.
+local function spinInto(s: any)
+	local b = emptyBoard(101)
+	s.build(b)
+	b.piece = { kind = Pieces.T, rot = s.pre.rot, x = s.pre.x, y = s.pre.y }
+	local turned = b:rotate(s.pre.dir)
+	return b, turned
 end
 
 local function countFilled(b): number
@@ -265,6 +323,23 @@ function T.net()
 	end
 	check("net: board survives a pack/unpack round trip", same)
 	eq("net: 200 cells pack into 100 bytes", buffer.len(Net.packBoard(cells)), 100)
+
+	-- Buffers arrive from clients, so "is this a board" has to be answerable
+	-- before anything is done with one.
+	check("net: a well-formed board validates", Net.isValidBoard(Net.packBoard(cells), 200))
+	check("net: a short buffer is rejected", not Net.isValidBoard(buffer.create(99), 200))
+	check("net: an oversized buffer is rejected", not Net.isValidBoard(buffer.create(4096), 200))
+	check("net: a non-buffer is rejected", not Net.isValidBoard("not a board", 200))
+	check("net: nil is rejected", not Net.isValidBoard(nil, 200))
+
+	local illegal = Net.packBoard(cells)
+	buffer.writeu8(illegal, 7, 15 * 16) -- a cell value no piece produces
+	check("net: a cell the game cannot produce is rejected", not Net.isValidBoard(illegal, 200))
+
+	-- A decoder that can be made to throw by the bytes it is handed is a
+	-- decoder that only works while everyone is honest.
+	check("net: unpacking a short buffer does not error", (pcall(Net.unpackBoard, buffer.create(4), 200)))
+	check("net: unpacking an empty buffer does not error", (pcall(Net.unpackBoard, buffer.create(0), 200)))
 end
 
 function T.tspin()
@@ -501,6 +576,360 @@ function T.elo()
 	end
 	check("elo: gains shrink as the gap widens", lastGain < firstGain,
 		("first +%d, last +%d"):format(firstGain, lastGain))
+
+	-- A ranked draw is rare — the clock running out on equal garbage — but
+	-- scoring it as nothing-happened is wrong when the ratings are not equal.
+	local dw, dl = Stats.elo(1200, 1000, 50, 50, 0.5)
+	check("elo: a draw costs the favourite", dw < 1200, tostring(dw))
+	check("elo: a draw pays the underdog", dl > 1000, tostring(dl))
+	local ew, el = Stats.elo(1000, 1000, 50, 50, 0.5)
+	eq("elo: a draw between equals moves the first nowhere", ew, 1000)
+	eq("elo: a draw between equals moves the second nowhere", el, 1000)
+end
+
+-- Every competitive message names its match. Without that, a lock still in
+-- flight from the last match lands on the next one — and a stale top-out ends a
+-- game that had barely started.
+function T.sessions()
+	local m = MatchInstance.new(4242, { name = "P1" }, { name = "P2" }, { seed = 5 })
+	check("session: a message for this match is accepted", m:ownsMessage({ matchId = 4242 }))
+	check("session: a message for the previous match is not", not m:ownsMessage({ matchId = 4241 }))
+	check("session: a message with no match id is not", not m:ownsMessage({}))
+	check("session: a non-table is not", not m:ownsMessage("4242"))
+end
+
+-- Leaving has to keep pointing at the player who left. Nil the reference here
+-- and the loss and the rating land on nobody, which makes quitting a ranked
+-- match you are losing strictly better than playing it out.
+function T.disconnect()
+	local quitter = { UserId = 7, DisplayName = "Quitter" }
+	local stayer = { UserId = 8, DisplayName = "Stayer" }
+	local m = MatchInstance.new(4243, { player = quitter }, { player = stayer },
+		{ mode = "ranked", seed = 11 })
+
+	local sawLoser, sawReason
+	m.onFinished = function(_, loser, reason) sawLoser, sawReason = loser, reason end
+	m:playerLeft(quitter)
+
+	check("disconnect: the match ended", m.finished)
+	eq("disconnect: the leaver is the loser", sawLoser, m.a)
+	eq("disconnect: reported as a leave, not a KO", sawReason, "left")
+	eq("disconnect: the leaver is still identified for stats", m.a.player, quitter)
+	check("disconnect: the leaver is flagged as gone", m.a.left == true)
+	check("disconnect: the side that stayed is untouched",
+		m.b.left == false and m.b.player == stayer)
+
+	-- And a second departure must not re-finish a settled match.
+	m:playerLeft(stayer)
+	check("disconnect: leaving an ended match changes nothing", m.b.left == false)
+end
+
+-- Practice is unopposed, so the only thing to cheat at is the record — and both
+-- the sprint time and the lines total show on the leaderboard tower.
+function T.practice()
+	local session = { id = 3, mode = "sprint", startedAt = 100, seed = 1 }
+	local honest = { sessionId = 3, time = 22, stats = { lines = 40, pieces = 104 } }
+
+	local rec = Practice.vet(session, honest, 122.4)
+	check("practice: an honest sprint is credited", rec ~= nil and rec.sprint == true)
+	eq("practice: and keeps the clock the player was shown", rec and rec.time, 22)
+
+	check("practice: a result for another session is refused",
+		(Practice.vet(session, { sessionId = 4, time = 22, stats = honest.stats }, 122.4)) == nil)
+	check("practice: a result with no session at all is refused",
+		(Practice.vet(nil, honest, 122.4)) == nil)
+
+	-- Stalling and then reporting a fast run is the attack worth stopping.
+	local stalled = Practice.vet(session, { sessionId = 3, time = 9,
+		stats = { lines = 40, pieces = 104 } }, 400)
+	check("practice: a time the server did not measure is not believed",
+		stalled ~= nil and stalled.time > 200, stalled and tostring(stalled.time))
+
+	-- Cell conservation: a cleared row is ten cells and a piece is four of them.
+	local few = Practice.vet(session, { sessionId = 3, time = 20,
+		stats = { lines = 40, pieces = 12 } }, 120.2)
+	check("practice: lines are bounded by the pieces that could have cleared them",
+		few ~= nil and few.lines <= 5, few and tostring(few.lines))
+	check("practice: so that run sets no record", few ~= nil and not few.sprint)
+
+	-- 40 lines needs 100 pieces, and 100 pieces cannot be placed in three
+	-- seconds, so the sprint floor falls out rather than being a magic number.
+	local instant = Practice.vet(session, { sessionId = 3, time = 3.1,
+		stats = { lines = 40, pieces = 104 } }, 103.1)
+	check("practice: a superhuman sprint sets no record",
+		instant ~= nil and not instant.sprint, instant and tostring(instant.lines))
+
+	local absurd = Practice.vet(session, { sessionId = 3, time = 20,
+		stats = { lines = 1e18, pieces = 1e18 } }, 120.2)
+	check("practice: an absurd lines total is clamped to what a sprint can be",
+		absurd ~= nil and absurd.lines <= Tuning.SPRINT_GOAL, absurd and tostring(absurd.lines))
+	local junk = Practice.vet(session, { sessionId = 3, time = "soon",
+		stats = { lines = {}, pieces = "many" } }, 120.2)
+	check("practice: junk in the numbers credits nothing rather than erroring",
+		junk ~= nil and junk.lines == 0 and junk.pieces == 0)
+end
+
+-- ── T-spins (Phase 11) ────────────────────────────────────────────────────
+
+-- The rule: the piece is a T, the last successful action was a rotation, and
+-- three of the four corners of its 3x3 box are solid. Both corners on the side
+-- the T points at makes it full; one makes it a mini. Walls and the floor count
+-- as solid corners; open air above the buffer does not.
+function T.tspinDetect()
+	for name, s in pairs(SPINS) do
+		local b, turned = spinInto(s)
+		check("tspin: " .. name .. " rotation succeeded", turned)
+		local p = b.piece
+		check("tspin: " .. name .. " landed where SRS puts it",
+			p and p.rot == s.land.rot and p.x == s.land.x and p.y == s.land.y,
+			p and ("rot%d (%d,%d)"):format(p.rot, p.x, p.y) or "no piece")
+		eq("tspin: " .. name .. " classifies", b:detectTSpin(), s.class)
+
+		local before = b.stats.lines
+		b:lock()
+		eq("tspin: " .. name .. " clears the rows it should", b.stats.lines - before, s.lines)
+	end
+
+	-- The same square, reached without turning into it. Three corners on their
+	-- own are not a spin, which is the whole point of tracking the last action.
+	local s = SPINS.double
+	local dropped = emptyBoard(101)
+	s.build(dropped)
+	dropped.piece = { kind = Pieces.T, rot = s.land.rot, x = s.land.x, y = s.land.y }
+	check("tspin: the same placement without a rotation is not a spin",
+		dropped:detectTSpin() == nil)
+	dropped:lock()
+	eq("tspin: and it is scored as an ordinary double", dropped.stats.tspins, 0)
+
+	-- Rotating and then falling is not a spin either: gravity clears the flag,
+	-- so a hard drop that travels cannot arrive as one.
+	local moved = emptyBoard(101)
+	moved.piece = { kind = Pieces.T, rot = 1, x = 3, y = 10 }
+	check("tspin: rotation in open air sets the flag", moved:rotate(1) and moved.lastKick)
+	check("tspin: falling one row clears it", moved:stepDown() and not moved.lastKick)
+	check("tspin: and the witness goes with it", moved.lastSpin == nil)
+
+	-- Only the T scores a spin, however well its corners line up.
+	local other = emptyBoard(101)
+	SPINS.double.build(other)
+	other.piece = { kind = Pieces.L, rot = 1, x = 3, y = 6 }
+	other:rotate(1)
+	check("tspin: another piece in the same board is never a spin", other:detectTSpin() == nil)
+end
+
+-- What a spin is worth. A T-spin is paid INSTEAD of the base clear, never on
+-- top of it, and every bonus applies exactly once.
+function T.tspinAttack()
+	local function atk(lines, spin, perfect, b2b, combo)
+		return Attack.compute(lines, spin, perfect or false, b2b or false, combo or 1).attack
+	end
+
+	eq("tspin attack: single sends 2", atk(1, "full"), 2)
+	eq("tspin attack: double sends 4", atk(2, "full"), 4)
+	eq("tspin attack: triple sends 6", atk(3, "full"), 6)
+	eq("tspin attack: mini single sends nothing", atk(1, "mini"), 0)
+	eq("tspin attack: mini double sends 1", atk(2, "mini"), 1)
+	eq("tspin attack: a spin that cleared nothing sends nothing", atk(0, "full"), 0)
+
+	-- The values must not have quietly fallen back to the base table, which is
+	-- exactly what an off-by-one in the lookup would look like.
+	check("tspin attack: a spin outscores the plain clear it replaces",
+		atk(1, "full") > atk(1, nil) and atk(2, "full") > atk(2, nil)
+		and atk(3, "full") > atk(3, nil))
+	eq("tspin attack: a full single is not a base single", atk(1, "full") == atk(1, nil), false)
+
+	-- Back-to-back.
+	check("tspin b2b: a spin that clears arms it", Attack.isB2BClear(1, "full"))
+	check("tspin b2b: a mini that clears arms it too", Attack.isB2BClear(1, "mini"))
+	check("tspin b2b: a spin that cleared nothing does not", not Attack.isB2BClear(0, "full"))
+	check("tspin b2b: an ordinary triple breaks it", not Attack.isB2BClear(3, nil))
+	check("tspin b2b: a quad keeps it", Attack.isB2BClear(4, nil))
+	eq("tspin b2b: a back-to-back double pays the bonus once", atk(2, "full", false, true), 5)
+	eq("tspin b2b: a back-to-back quad still pays 5", atk(4, nil, false, true), 5)
+
+	-- Combo, once, on top of the spin value.
+	eq("tspin combo: a fifth consecutive clear adds its combo row", atk(1, "full", false, false, 5), 3)
+	eq("tspin combo: the plain table gets the same combo row", atk(1, nil, false, false, 5), 1)
+
+	-- Perfect clear, once.
+	eq("tspin perfect: a spin double that empties the board", atk(2, "full", true), 14)
+	eq("tspin perfect: everything at once, each counted once",
+		atk(2, "full", true, true, 5), 4 + 1 + 1 + 10)
+
+	-- Cancellation is the same pipeline as any other attack.
+	local queue = { { rows = 3, at = 0 } }
+	eq("tspin cancel: a double against three incoming sends one",
+		Attack.cancel(queue, atk(2, "full")), 1)
+	eq("tspin cancel: and the incoming queue is emptied", Attack.pending(queue), 0)
+end
+
+-- Back-to-back across the two clear types that keep it alive, driven through
+-- real locks rather than through the attack table alone.
+function T.tspinB2B()
+	local function quadBoard(seed)
+		local b = emptyBoard(seed)
+		for row = 1, 4 do fillRow(b, row, 10) end
+		cell(b, 1, 12) -- keeps the board from emptying into a perfect clear
+		b.piece = { kind = Pieces.I, rot = 2, x = 7, y = 1 }
+		return b
+	end
+
+	local b = quadBoard(13)
+	b:lock()
+	check("tspin b2b: a quad arms back-to-back", b.b2b)
+
+	-- Quad then spin: the chain survives and the spin is paid the bonus.
+	local s = SPINS.double
+	s.build(b)
+	b.piece = { kind = Pieces.T, rot = s.pre.rot, x = s.pre.x, y = s.pre.y }
+	b:rotate(s.pre.dir)
+	b.combo = 0 -- isolate the b2b bonus from the combo table
+	b:lock()
+	local spin
+	for _, e in ipairs(b:drain()) do
+		if e.kind == "lock" then spin = e.data end
+	end
+	check("tspin b2b: a quad into a spin keeps the chain", spin and spin.info.b2b)
+	eq("tspin b2b: and the spin double pays 4 plus the bonus", spin and spin.info.attack, 5)
+	check("tspin b2b: the chain is still armed afterwards", b.b2b)
+
+	-- Spin then quad: the same in the other direction.
+	local c = emptyBoard(17)
+	SPINS.double.build(c)
+	c.piece = { kind = Pieces.T, rot = s.pre.rot, x = s.pre.x, y = s.pre.y }
+	c:rotate(s.pre.dir)
+	c:lock()
+	check("tspin b2b: a spin arms the chain", c.b2b)
+	for row = 1, 4 do fillRow(c, row, 10) end
+	cell(c, 1, 12)
+	c.piece = { kind = Pieces.I, rot = 2, x = 7, y = 1 }
+	c.combo = 0
+	c:lock()
+	local quad
+	for _, e in ipairs(c:drain()) do
+		if e.kind == "lock" then quad = e.data end
+	end
+	check("tspin b2b: a spin into a quad keeps the chain", quad and quad.info.b2b)
+	eq("tspin b2b: and that quad pays 4 plus the bonus", quad and quad.info.attack, 5)
+
+	-- An ordinary clear breaks it.
+	local d = emptyBoard(19)
+	SPINS.double.build(d)
+	d.piece = { kind = Pieces.T, rot = s.pre.rot, x = s.pre.x, y = s.pre.y }
+	d:rotate(s.pre.dir)
+	d:lock()
+	check("tspin b2b: armed before the ordinary clear", d.b2b)
+	-- A plain single, built from scratch so the shifted board left by the spin
+	-- cannot change what clears. O sits in columns x+2 and x+3 on rows y and
+	-- y+1, so x=3 y=0 fills the gap on the bottom row.
+	for i = 1, d.w * d.h do d.cells[i] = 0 end
+	fillRow(d, 1, 5, 6)
+	d.combo = 0
+	d.piece = { kind = Pieces.O, rot = 1, x = 3, y = 0 }
+	d:lock()
+	eq("tspin b2b: the ordinary clear happened", d.stats.lines, 3)
+	check("tspin b2b: an ordinary clear breaks the chain", not d.b2b)
+end
+
+-- One spin is one stat, whatever it cleared.
+function T.tspinStats()
+	for _, name in ipairs({ "single", "double", "triple" }) do
+		local b, turned = spinInto(SPINS[name])
+		check("tspin stat: " .. name .. " turned", turned)
+		b:lock()
+		eq("tspin stat: a " .. name .. " counts as one spin", b.stats.tspins, 1)
+	end
+
+	-- A spin that clears nothing is not counted, which is the rule the board
+	-- already had: the stat tracks spins that did something.
+	local b = emptyBoard(101)
+	SPINS.double.build(b)
+	-- Knock a hole in column 1 of both rows the piece touches, so neither can
+	-- complete. The corners sit in columns 4 and 6 and are left alone.
+	b.cells[1] = 0
+	b.cells[b.w + 1] = 0
+	b.piece = { kind = Pieces.T, rot = SPINS.double.pre.rot,
+		x = SPINS.double.pre.x, y = SPINS.double.pre.y }
+	b:rotate(SPINS.double.pre.dir)
+	eq("tspin stat: still detected with nothing to clear", b:detectTSpin(), "full")
+	b:lock()
+	eq("tspin stat: a spin that cleared nothing is not counted", b.stats.tspins, 0)
+	eq("tspin stat: and sent nothing", b.stats.sent, 0)
+end
+
+-- The server does not watch the player rotate, so it replays the rotation the
+-- client describes against its own cells. This is the test that the result is
+-- derived there and not accepted from the wire.
+function T.tspinAuthority()
+	local s = SPINS.double
+	local client_, turned = spinInto(s)
+	check("authority: the reference rotation happened", turned)
+	local witness = client_.lastSpin
+	check("authority: a rotation records what it turned from", witness ~= nil)
+
+	-- A board that has never run the rotation reaches the same verdict from the
+	-- witness alone.
+	local shadow = emptyBoard(101)
+	s.build(shadow)
+	local L = s.land
+	check("authority: a genuine rotation verifies on a board that never ran it",
+		shadow:verifySpin(Pieces.T, L.rot, L.x, L.y, witness))
+	check("authority: no witness, no spin",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y, nil))
+	check("authority: a witness that is not a table is refused",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y, "full"))
+	check("authority: a witness turning the wrong way is refused",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y,
+			{ rot = witness.rot, x = witness.x, y = witness.y, dir = -witness.dir }))
+	check("authority: a witness from a square the piece could not stand on is refused",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y,
+			{ rot = witness.rot, x = witness.x + 3, y = witness.y, dir = witness.dir }))
+	check("authority: a witness whose rotation lands somewhere else is refused",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y,
+			{ rot = witness.rot, x = witness.x, y = witness.y + 6, dir = witness.dir }))
+	check("authority: a fractional square is refused",
+		not shadow:verifySpin(Pieces.T, L.rot, L.x, L.y,
+			{ rot = witness.rot, x = witness.x + 0.5, y = witness.y, dir = witness.dir }))
+
+	-- And now the whole path on the real match object. The shadow is told only
+	-- where the piece ended up and which rotation put it there; everything else
+	-- in the message is the kind of thing a patched client would forge.
+	local FORGED = { tspin = "full", send = 99, lines = 4, attack = 99,
+		b2b = true, combo = 12, perfect = true }
+	local function play(id: number, spin: any, incoming: number?)
+		local match = MatchInstance.new(id, { name = "P1" }, { name = "P2" }, { seed = 7 })
+		match.state = "playing"
+		local routed = 0
+		match.onGarbage = function(_, rows) routed += rows end
+		local side = match.a
+		local b = side.board
+		for i = 1, b.w * b.h do b.cells[i] = 0 end
+		s.build(b)
+		b.piece = { kind = Pieces.T, rot = 1, x = 3, y = 20 }
+		if incoming then b:queueGarbage(incoming, 4, 0) end
+		local msg = { index = 1, kind = Pieces.T, rot = L.rot, x = L.x, y = L.y, spin = spin }
+		for k, v in pairs(FORGED) do msg[k] = v end
+		local realMin = Tuning.MIN_LOCK_INTERVAL
+		Tuning.MIN_LOCK_INTERVAL = 0
+		match:applyLock(side, msg)
+		Tuning.MIN_LOCK_INTERVAL = realMin
+		return side, routed
+	end
+
+	local withSpin, sent = play(4311, witness)
+	eq("authority: the shadow accepted the placement", withSpin.accepted, 1)
+	eq("authority: the shadow counted the spin itself", withSpin.board.stats.tspins, 1)
+	eq("authority: and sent the spin double it derived, not the forged 99", sent, 4)
+
+	local without, sentPlain = play(4312, nil)
+	eq("authority: the same placement with no witness still locks", without.accepted, 1)
+	eq("authority: but is no spin", without.board.stats.tspins, 0)
+	eq("authority: and pays the base double, not the forged 99", sentPlain, 1)
+
+	-- Cancellation is not bypassed: three incoming against a spin worth four.
+	local _, sentAfterCancel = play(4313, witness, 3)
+	eq("authority: a spin cancels incoming garbage before any of it is sent",
+		sentAfterCancel, 1)
 end
 
 -- Human vs human, without two clients.
@@ -644,11 +1073,14 @@ function T.run(root: Instance?, services: Instance?)
 	BotService = require((services :: any).BotService)
 	MatchInstance = require((services :: any).MatchInstance)
 	Stats = require((services :: any).StatsService)
+	Practice = require((services :: any).PracticeService)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
 		"topOuts", "attack", "net", "tspin", "cloneIsolation", "determinism",
-		"gravityAndLock", "holdAndReach", "reachCost", "elo", "bots", "twoPlayer" }
+		"gravityAndLock", "holdAndReach", "reachCost", "elo", "sessions", "disconnect",
+		"practice", "tspinDetect", "tspinAttack", "tspinB2B", "tspinStats",
+		"tspinAuthority", "bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])
 		if not ok then

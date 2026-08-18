@@ -74,11 +74,18 @@ function MatchmakingService.enqueue(player: Player, mode: string)
 	end
 end
 
+function MatchmakingService.isQueued(player: Player): boolean
+	return indexOf(player) ~= nil
+end
+
 function MatchmakingService.cancel(player: Player)
 	local i = indexOf(player)
 	if i then
 		table.remove(queue, i)
-		Remotes.MatchUpdate:FireClient(player, { state = Enums.State.Idle })
+		-- playerLeaving cancels too, and by then there is nobody to tell.
+		if player.Parent then
+			Remotes.MatchUpdate:FireClient(player, { state = Enums.State.Idle })
+		end
 	end
 end
 
@@ -88,9 +95,11 @@ function MatchmakingService.playerLeaving(player: Player)
 	if m then m:playerLeft(player) end
 end
 
-function MatchmakingService.forfeit(player: Player)
+-- A forfeit names its match for the same reason a lock does: one still in
+-- flight from the last match would otherwise throw away the next one.
+function MatchmakingService.forfeit(player: Player, msg: any)
 	local m = MatchmakingService.matchFor(player)
-	if m then m:forfeit(player) end
+	if m and m:ownsMessage(msg) then m:forfeit(player) end
 end
 
 function MatchmakingService.onLock(player: Player, msg: any)

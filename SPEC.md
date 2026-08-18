@@ -32,6 +32,7 @@ Studio instance: **Tetris Battle**. Ship name **BLOCK ARENA** — never render "
 ## Attack table (`Shared/Attack`)
 
 Single 0 · Double 1 · Triple 2 · Quad 4 · B2B Quad +1 · Perfect clear +10
+T-spin single 2 · double 4 · triple 6 · mini single 0 · mini double 1 (indexed by lines, from zero)
 Combo (by consecutive clears): `{0,0,1,1,1,2,2,3,3,4,4,4,5}`
 Cancel: `incoming -= outgoing`, send remainder. Resolve before transmitting.
 Garbage: one gap column per **batch**; ~70% chance to re-roll column on each new batch.
@@ -43,7 +44,9 @@ Second high-contrast palette behind a setting.
 
 ## Non-negotiable rules
 
-Full SRS kick tables (JLSTZ + I) · lock-delay reset cap 15 · garbage cancelling · charged garbage queue · one hold per piece · three top-outs (block out / lock out / garbage push-out) · perfect clear check · stall protection. T-spin: detect and display, attack value 0 in v1.
+Full SRS kick tables (JLSTZ + I) · lock-delay reset cap 15 · garbage cancelling · charged garbage queue · one hold per piece · three top-outs (block out / lock out / garbage push-out) · perfect clear check · stall protection. T-spin: 3-corner rule, last action must be a rotation; both front corners = full, one = mini.
+Attack **single 2 / double 4 / triple 6**, mini **single 0 / double 1**, paid instead of the base clear.
+Enabled in Phase 11; the server derives it from the shadow board via `Board.verifySpin`, never from the client.
 
 ## Roblox traps
 

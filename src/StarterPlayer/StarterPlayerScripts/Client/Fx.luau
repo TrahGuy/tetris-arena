@@ -56,11 +56,34 @@ function Fx:flashScreen(colour: Color3, strength: number, time: number?)
 		Enum.EasingDirection.Out), { BackgroundTransparency = 1 }):Play()
 end
 
+-- A T-spin can clear at most three rows, so this never has to name a quad.
+local SPIN_LINES = { "SINGLE", "DOUBLE", "TRIPLE" }
+
+local function spinLabel(info: any): string
+	local label = (info.tspin == "mini") and "T-SPIN MINI" or "T-SPIN"
+	if SPIN_LINES[info.lines] then
+		label ..= "  " .. SPIN_LINES[info.lines]
+	end
+	if info.b2b then
+		label ..= "  ·  BACK-TO-BACK"
+	end
+	return label
+end
+
 -- Called on every lock, so the response scales with what actually happened
 -- rather than firing the same effect for a single and for a quad.
 function Fx:onClear(info: any)
 	local n = info.lines
-	if n <= 0 then return end
+	-- A spin that cleared nothing still gets its name said out loud. It is worth
+	-- no attack, and a player who has just wedged a T into a slot and got
+	-- silence cannot tell whether the game saw it or they misread the board.
+	-- Banner only, no flash: it is information, not an event.
+	if n <= 0 then
+		if info.tspin then
+			self.hud:flash(spinLabel(info), Theme.C.violet)
+		end
+		return
+	end
 	if n >= 4 then
 		self:kick(0.85)
 		self:flashScreen(Theme.C.cy, 0.42)
@@ -68,7 +91,7 @@ function Fx:onClear(info: any)
 	elseif info.tspin then
 		self:kick(0.5)
 		self:flashScreen(Theme.C.violet, 0.3)
-		self.hud:flash((info.tspin == "mini" and "T-SPIN MINI" or "T-SPIN"), Theme.C.violet)
+		self.hud:flash(spinLabel(info), Theme.C.violet)
 	elseif n >= 2 then
 		self:kick(0.28)
 	end

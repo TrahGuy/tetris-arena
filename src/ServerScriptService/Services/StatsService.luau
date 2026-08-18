@@ -51,24 +51,39 @@ end
 -- The maths on its own, so it can be tested without a profile or a DataStore.
 -- Returns the winner's and loser's new ratings. Floored at 100, so a losing
 -- streak cannot bottom out into meaninglessness.
-function StatsService.elo(ratingW: number, ratingL: number, playedW: number, playedL: number)
+--
+-- `scoreW` is what the first player scored: 1 for a win, 0.5 for a draw. A
+-- ranked match that runs the clock out on equal garbage is rare, but scoring it
+-- as nothing-happened is wrong in the one case it matters — the favourite
+-- should still have given something up.
+function StatsService.elo(ratingW: number, ratingL: number, playedW: number, playedL: number,
+	scoreW: number?)
+	local s = scoreW or 1
 	local kw, kl = kFactor(playedW), kFactor(playedL)
 	local ew = expectedScore(ratingW, ratingL)
 	local el = expectedScore(ratingL, ratingW)
-	return math.max(100, math.floor(ratingW + kw * (1 - ew) + 0.5)),
-		math.max(100, math.floor(ratingL + kl * (0 - el) + 0.5))
+	return math.max(100, math.floor(ratingW + kw * (s - ew) + 0.5)),
+		math.max(100, math.floor(ratingL + kl * ((1 - s) - el) + 0.5))
 end
 
-function StatsService.applyElo(winner: Player, loser: Player)
+-- Applies the change and reports what each rating did, so the result card can
+-- show it. Draws do not count toward either player's match total: the K factor
+-- is meant to settle as a player is placed, and a draw places nobody.
+function StatsService.applyElo(winner: Player, loser: Player, scoreW: number?): (any?, any?)
 	local w, l = profiles[winner.UserId], profiles[loser.UserId]
-	if not w or not l then return end
-	w.rating, l.rating = StatsService.elo(w.rating, l.rating,
-		w.rankedWins + w.rankedLosses, l.rankedWins + l.rankedLosses)
+	if not w or not l then return nil, nil end
+	local beforeW, beforeL = w.rating, l.rating
+	w.rating, l.rating = StatsService.elo(beforeW, beforeL,
+		w.rankedWins + w.rankedLosses, l.rankedWins + l.rankedLosses, scoreW)
 	w.peakRating = math.max(w.peakRating, w.rating)
-	w.rankedWins += 1
-	l.rankedLosses += 1
+	if (scoreW or 1) >= 1 then
+		w.rankedWins += 1
+		l.rankedLosses += 1
+	end
 	dirty[winner.UserId] = true
 	dirty[loser.UserId] = true
+	return { before = beforeW, after = w.rating, delta = w.rating - beforeW },
+		{ before = beforeL, after = l.rating, delta = l.rating - beforeL }
 end
 
 do
@@ -176,6 +191,9 @@ function StatsService.applySettings(player: Player, s: any)
 	dirty[player.UserId] = true
 end
 
+-- Runs while a disconnecting player's profile is still loaded: PlayerRemoving
+-- calls playerLeaving synchronously and only then spawns the release. A side
+-- that has left still carries its Player, which is how the loss finds them.
 function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 	for _, side in ipairs({ match.a, match.b }) do
 		local player = side.player
@@ -199,11 +217,18 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 	end
 
 	-- Leaving a ranked match still costs rating. Otherwise the way to protect a
-	-- rating is to quit whenever you are behind.
-	if match.mode == Enums.Mode.Ranked and loser and loser.player then
-		local winner = loser.other
-		if winner and winner.player then
-			StatsService.applyElo(winner.player, loser.player)
+	-- rating is to quit whenever you are behind — and this is reached on a
+	-- disconnect precisely because the side kept hold of its Player.
+	if match.mode == Enums.Mode.Ranked then
+		if loser == nil then
+			if match.a.player and match.b.player then
+				match.a.elo, match.b.elo = StatsService.applyElo(match.a.player, match.b.player, 0.5)
+			end
+		else
+			local winner = loser.other
+			if loser.player and winner and winner.player then
+				winner.elo, loser.elo = StatsService.applyElo(winner.player, loser.player, 1)
+			end
 		end
 	end
 
@@ -219,12 +244,15 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 	StatsService.refreshLeaderboard()
 end
 
-function StatsService.recordPractice(player: Player, mode: string, stats: any, time: number)
+-- `record` comes from PracticeService.vet, never straight off the wire. Every
+-- number here has already been bounded by the wall clock the server measured,
+-- so this credits rather than judges.
+function StatsService.recordPractice(player: Player, record: any)
 	local p = profiles[player.UserId]
-	if not p then return end
-	p.lines += (stats and stats.lines or 0)
-	if mode == Enums.Mode.Sprint and stats and stats.lines >= 40 then
-		p.bestSprint = (p.bestSprint > 0) and math.min(p.bestSprint, time) or time
+	if not p or type(record) ~= "table" then return end
+	p.lines += record.lines
+	if record.sprint then
+		p.bestSprint = (p.bestSprint > 0) and math.min(p.bestSprint, record.time) or record.time
 	end
 	dirty[player.UserId] = true
 end
@@ -236,7 +264,11 @@ end
 local function rebuildPanel(part: BasePart, title: string, accent: Color3, rows: { any })
 	local sg = part:FindFirstChildOfClass("SurfaceGui")
 	if not sg then return end
-	local root = sg:FindFirstChild("Root")
+	-- The fallback is for places built before 03_stations named this frame:
+	-- the lookup missed, this returned early, and the tower showed its
+	-- placeholder rows for good. Tolerating both spellings means live servers
+	-- do not need the world rebuilt to get a working leaderboard.
+	local root = sg:FindFirstChild("Root") or sg:FindFirstChildOfClass("Frame")
 	if not root then return end
 	for _, c in ipairs(root:GetChildren()) do
 		if c:IsA("TextLabel") or c:IsA("Frame") then c:Destroy() end

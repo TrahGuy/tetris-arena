@@ -29,6 +29,8 @@ open at that path). Move it in here when convenient.
 | 7 — Juice and audio | done |
 | 8 — Persistence, settings, stats, Elo | done |
 | 9 — Mobile touch / gamepad | done |
+| 10 — Competitive hardening | done |
+| 11 — T-spin scoring and attack | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -54,15 +56,92 @@ description — so swap any that sound wrong. One line each.
 | Gap | Why |
 | --- | --- |
 | No Blitz mode | Practice is a 40-line Sprint with a clock and a saved best. A 2-minute score attack would need its own scoring table, which does not exist. |
-| T-spins score zero | Detected and shown; `Attack.TSPIN_ENABLED` is false on purpose until the base game is proven. |
+| A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
 | Museum skins are display-only | No cosmetic ownership system. Board skins are the natural monetisation here and the renderer is built so a skin is a palette swap plus an effect hook — but nothing owns, sells or equips one. |
 | Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
 | Leaderboard is server-local | It ranks whoever is in this server. A global one needs OrderedDataStores and a moderation story for names. |
+| Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
 | Never tested with two live humans | Studio over MCP drives one client. `Tests.twoPlayer` covers the path headlessly: two stand-in clients run their own boards and report locks exactly as `Main.client` does, with garbage and resync mirrored back the way the remotes deliver them. |
+
+## Competitive integrity
+
+Four things the server used to take on trust, and no longer does.
+
+**Every competitive message names its match.** `MatchUpdate`, `Lock`, `Garbage`,
+`Resync`, `Snapshot`, `Result` and `Forfeit` all carry a `matchId`, and both
+ends drop anything addressed elsewhere. Matches run back to back — rematch,
+requeue — and a message still in flight from the last one used to land on the
+next: at best a spurious resync, at worst a stale `topout` or forfeit throwing
+away a game that had barely started.
+
+**Opponent boards come from the shadow, never from the client that owns them.**
+`MatchInstance:_publishSnapshots` packs both sides at `SNAPSHOT_HZ`. It costs no
+freshness — cells only move when a piece locks or garbage lands, and the shadow
+does both at the same moments — and it means nobody can draw what they like on
+their opponent's screen, send a malformed buffer that errors the receiver's
+decoder, or hide their stack by simply not sending. The client's own snapshot is
+still sent, but only as the divergence probe that triggers a resync, and it is
+checked by `Net.isValidBoard` before anything is done with it.
+
+**Leaving a ranked match costs rating.** It always said so; the code did the
+opposite. `playerLeft` cleared the side's Player before the result was recorded,
+so by the time `recordMatch` looked for the profile that owed the loss there was
+nobody there — no loss, no streak reset, no Elo. The reference now survives the
+disconnect and a `left` flag stops anything being fired at a client that has
+gone. Rating is settled before the result goes out, so the card shows what the
+match did to it.
+
+**Practice results are vetted against the clock the server measured.**
+`PracticeService` issues a session with the seed and times the run itself.
+A submitted result has to be consistent with that window and with limits the
+game defines — `MAX_PPS`, four rows per piece, ten cells per row, `SPRINT_GOAL`.
+A hand-written remote call claiming a billion lines in a millisecond credits
+what the elapsed seconds allow and sets no record. Short of replaying inputs
+server-side, a cheater can still claim any run they could have played; they can
+no longer claim one they could not have.
+
+## T-spins
+
+**The rule.** The piece is a T, the last successful action was a rotation, and
+three of the four corners of its 3x3 box are solid — walls and the floor count,
+open air above the buffer does not. Both corners on the side the T points at
+makes it *full*; one makes it a *mini*. That is the standard 3-corner rule and
+it is unchanged from the detector Phase 4 shipped; what Phase 11 changed is who
+gets to decide it.
+
+**Attack**, paid instead of the base clear, never on top of it:
+
+| | 1 line | 2 lines | 3 lines |
+| --- | --- | --- | --- |
+| full | 2 | 4 | 6 |
+| mini | 0 | 1 | — |
+
+Back-to-back adds 1 and any spin that clears keeps the chain alive, so quad into
+spin and spin into quad both hold it. Combo and perfect clear apply exactly as
+they do to any other clear. A spin that clears nothing is worth nothing, does
+not touch the chain, and is not counted in `stats.tspins` — but it is still
+named on the banner, because a player who has just wedged a T into a slot and
+got silence cannot tell whether the game saw it.
+
+**How the server knows.** The shadow board is advanced by reported placements,
+never by inputs, so it never runs the rotation that makes a spin a spin — its
+`lastKick` was false for every lock a human ever sent, and it would have scored
+every T-spin as an ordinary clear while the client scored it as a spin. Since
+`Board:lock` cancels incoming garbage with that number, the two boards would
+have taken different garbage and desynced.
+
+So the lock carries a **witness**: the square the piece turned from and which
+way. `Board.verifySpin` replays that rotation on the server's own cells — the
+piece must have fitted where the client says it stood, that square must be one
+`reachable()` can get to, and the SRS kick table applied from there must land
+exactly on the reported placement. A witness that passes sets the same flag the
+player's own rotation would have set, and detection proceeds from the server's
+board as usual. Nothing else about the spin comes off the wire; `send` and
+`lines` were removed from the lock payload entirely.
 
 ## Tests
 
-179 assertions. **Run them in Play mode, from the Server datamodel:**
+290 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()

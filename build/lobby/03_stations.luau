@@ -121,6 +121,10 @@ for _, pn in ipairs(PANELS) do
 	sg.Parent = part
 
 	local root = Instance.new("Frame")
+	-- StatsService.refreshLeaderboard finds this by name to replace the rows
+	-- below with live data. Unnamed, it stayed "Frame", the lookup missed, and
+	-- the tower quietly showed these placeholders forever.
+	root.Name = "Root"
 	root.Size, root.BackgroundColor3, root.BorderSizePixel = UDim2.fromScale(1, 1), C.panel, 0
 	root.Parent = sg
 	local st = Instance.new("UIStroke"); st.Color, st.Thickness = pn.accent, 5; st.Parent = root

@@ -10,14 +10,20 @@
 -- On disagreement the server resyncs the client rather than kicking. Treating
 -- every mismatch as cheating turns our own desync bugs into bans, and the false
 -- positives land on honest players with bad connections.
+--
+-- Every message in and out of a match names the match it belongs to. Matches
+-- are back to back — rematch, requeue — and a lock, a forfeit or a garbage line
+-- still in flight from the last one has no business landing on the next.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Board = require(Shared.Board)
+local Pieces = require(Shared.Pieces)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
+local Attack = require(Shared.Attack)
 local Net = require(Shared.Net)
 local Remotes = require(Shared.Remotes)
 local BotService = require(script.Parent.BotService)
@@ -26,6 +32,18 @@ local MatchInstance = {}
 MatchInstance.__index = MatchInstance
 
 local MISMATCHES_BEFORE_RESYNC = 3
+local SNAPSHOT_CELLS = Tuning.WIDTH * Tuning.VISIBLE
+
+-- The Player still on the other end of a side, or nil.
+--
+-- A side keeps its Player after a disconnect, because the result is recorded
+-- against it and someone who walks out of a ranked match owes the rating. The
+-- `left` flag is what stops anything being fired at a client that has gone.
+local function client(side: any): Player?
+	if side.left then return nil end
+	local p = side.player
+	return (p and p.Parent) and p or nil
+end
 
 local function makeSide(spec: any, seed: number)
 	local side = {
@@ -34,14 +52,14 @@ local function makeSide(spec: any, seed: number)
 		-- makes a two-player match testable without two clients.
 		name = spec.name or (spec.player and spec.player.DisplayName) or nil,
 		alive = true,
+		left = false,
 		lastIndex = 0,
 		lastLockAt = 0,
 		mismatches = 0,
 		rejects = 0,
 		accepted = 0,
+		badSnapshots = 0,
 		lastReject = "",
-		snapshot = nil,
-		incoming = 0,
 	}
 	if spec.bot then
 		side.bot = BotService.new(seed, spec.bot)
@@ -67,6 +85,7 @@ function MatchInstance.new(id: number, specA: any, specB: any, opts: any?)
 		finished = false,
 		onFinished = nil,
 		suddenTimer = 0,
+		snapTimer = 0,
 	}, MatchInstance)
 
 	self.a = makeSide(specA, seed)
@@ -74,9 +93,11 @@ function MatchInstance.new(id: number, specA: any, specB: any, opts: any?)
 	self.a.other, self.b.other = self.b, self.a
 
 	for _, side in ipairs({ self.a, self.b }) do
-		if side.player then
-			Remotes.MatchUpdate:FireClient(side.player, {
+		local p = client(side)
+		if p then
+			Remotes.MatchUpdate:FireClient(p, {
 				state = Enums.State.Countdown,
+				matchId = id,
 				seed = seed,
 				mode = self.mode,
 				opponent = side.other.name,
@@ -100,12 +121,17 @@ end
 -- running match gets inspected at all.
 function MatchInstance:summary(): string
 	local function s(side: any)
-		return ("%s[ok %d rej %d%s p%d L%d%s]"):format(
+		return ("%s[ok %d rej %d%s%s p%d L%d%s%s%s]"):format(
 			tostring(side.name),
 			side.accepted, side.rejects,
+			side.badSnapshots > 0 and (" bad " .. side.badSnapshots) or "",
 			side.lastReject ~= "" and (" '" .. side.lastReject .. "'") or "",
 			side.board.stats.pieces, side.board.stats.lines,
-			side.alive and "" or " DEAD")
+			-- Spins the SERVER derived, which is the number worth watching: it
+			-- is what the attack was actually paid on.
+			side.board.stats.tspins > 0 and (" T" .. side.board.stats.tspins) or "",
+			side.alive and "" or " DEAD",
+			side.left and " LEFT" or "")
 	end
 	return ("#%d %s t%.0f %s vs %s"):format(self.id, self.state, self.elapsed,
 		s(self.a), s(self.b))
@@ -144,6 +170,7 @@ end
 function MatchInstance:_resync(side: any)
 	local b = side.board
 	local payload = {
+		matchId = self.id,
 		cells = b.cells,
 		piece = b.piece and table.clone(b.piece) or nil,
 		hold = b.hold,
@@ -153,8 +180,9 @@ function MatchInstance:_resync(side: any)
 		b2b = b.b2b,
 		index = side.lastIndex,
 	}
-	if side.player then
-		Remotes.Resync:FireClient(side.player, payload)
+	local p = client(side)
+	if p then
+		Remotes.Resync:FireClient(p, payload)
 	end
 	if self.onResync then
 		self.onResync(side, payload)
@@ -162,9 +190,22 @@ function MatchInstance:_resync(side: any)
 	side.mismatches = 0
 end
 
+-- Does this message belong to this match?
+--
+-- Without the check, a lock still in flight from the previous match lands on
+-- the next one. A fresh match starts its lock index at zero, so the mildest
+-- outcome is a spurious resync — and the worst is a stale `topout` ending a
+-- game that had barely started.
+function MatchInstance:ownsMessage(msg: any): boolean
+	return type(msg) == "table" and tonumber(msg.matchId) == self.id
+end
+
+-- The untrusted boundary. Everything a client sends arrives here; applyLock is
+-- the internal path bots and tests drive directly.
 function MatchInstance:onLock(player: Player, msg: any)
+	if not self:ownsMessage(msg) then return end
 	local side = self:sideFor(player)
-	if not side then return end
+	if not side or side.left then return end
 	self:applyLock(side, msg)
 end
 
@@ -172,22 +213,28 @@ end
 function MatchInstance:applyLock(side: any, msg: any)
 	if self.finished or type(msg) ~= "table" then return end
 
-	-- Cosmetic snapshot relay, and the divergence check.
-	if msg.snapshot then
-		side.snapshot = msg.snapshot
-		side.incoming = tonumber(msg.incoming) or 0
-		local other = side.other
-		if other.player then
-			Remotes.Snapshot:FireClient(other.player, msg.snapshot, { incoming = side.incoming })
+	-- The client's own view of its board. It is never forwarded to anyone — see
+	-- _publishSnapshots — and exists only so the server can tell whether the two
+	-- boards have drifted apart.
+	if msg.snapshot ~= nil then
+		if not Net.isValidBoard(msg.snapshot, SNAPSHOT_CELLS) then
+			-- Wrong type, wrong length, or cells the game cannot produce. There
+			-- is nothing here to compare against and a resync would not fix
+			-- whatever produced it, so it is counted and dropped.
+			side.badSnapshots += 1
+			side.lastReject = "malformed snapshot"
+			if side.badSnapshots % 20 == 1 then
+				warn(("[Match %d] discarded a malformed snapshot from %s"):format(
+					self.id, tostring(side.name)))
+			end
+			return
 		end
 		local mine = Net.packBoard(side.board:snapshot())
-		local ok = buffer.len(mine) == buffer.len(msg.snapshot)
-		if ok then
-			for i = 0, buffer.len(mine) - 1 do
-				if buffer.readu8(mine, i) ~= buffer.readu8(msg.snapshot, i) then
-					ok = false
-					break
-				end
+		local ok = true
+		for i = 0, buffer.len(mine) - 1 do
+			if buffer.readu8(mine, i) ~= buffer.readu8(msg.snapshot, i) then
+				ok = false
+				break
 			end
 		end
 		-- Garbage landing a frame apart is a legitimate transient difference, so
@@ -200,7 +247,10 @@ function MatchInstance:applyLock(side: any, msg: any)
 	end
 
 	if msg.topout then
-		if side.alive then
+		-- Only while the match is actually running. A top-out reported during
+		-- the countdown or after the result is either stale or a client ending
+		-- a game it is not playing.
+		if self.state == Enums.State.Playing and side.alive then
 			side.alive = false
 			self:_finish(side, Enums.Result.Win)
 		end
@@ -240,6 +290,17 @@ function MatchInstance:applyLock(side: any, msg: any)
 		return self:_reject(side, "placement is not reachable")
 	end
 
+	-- The shadow is advanced by placements, not by inputs, so it never runs the
+	-- rotation that makes a spin a spin. The client sends the rotation it says
+	-- it made and the server replays it here against its own cells; only a
+	-- rotation that genuinely lands on this square, from a square the piece
+	-- could have reached, sets the flag. Everything downstream — full or mini,
+	-- the line count, back-to-back, the combo, the attack — is then derived by
+	-- b:lock() from the server's board. Nothing about the result comes off the
+	-- wire. Restricted to T because nothing else scores a spin, and the check
+	-- costs a reachability search.
+	b.lastKick = kind == Pieces.T and b:verifySpin(kind, rot, x, y, msg.spin) or false
+
 	side.lastIndex = index
 	side.lastLockAt = now
 	side.accepted += 1
@@ -274,8 +335,9 @@ function MatchInstance:_send(from: any, rows: number)
 	local target = from.other
 	local gap = self.rng:NextInteger(1, Tuning.WIDTH)
 	target.board:queueGarbage(rows, gap, self.elapsed + Tuning.GARBAGE_DELAY)
-	if target.player then
-		Remotes.Garbage:FireClient(target.player, { rows = rows, gapCol = gap })
+	local p = client(target)
+	if p then
+		Remotes.Garbage:FireClient(p, { matchId = self.id, rows = rows, gapCol = gap })
 	end
 	-- Same information the client gets, for anything else that needs it — the
 	-- two-player test mirrors it onto its stand-in client boards.
@@ -285,6 +347,28 @@ function MatchInstance:_send(from: any, rows: number)
 end
 
 -- ── Loop ──────────────────────────────────────────────────────────────────
+
+-- Each player's view of the other is drawn from the shadow board, never
+-- forwarded from the client that owns it.
+--
+-- It costs no freshness: cells only move when a piece locks or garbage lands,
+-- and the shadow does both at the same moments the real board does. What it
+-- buys is that nobody can draw whatever they like on their opponent's screen —
+-- or hide their stack by simply not sending. Bots never had a client to forward
+-- from in the first place, so this is now one path instead of two.
+--
+-- `incoming` is the server's own count of charged garbage, for the same reason.
+function MatchInstance:_publishSnapshots()
+	for _, side in ipairs({ self.a, self.b }) do
+		local watcher = client(side.other)
+		if watcher then
+			Remotes.Snapshot:FireClient(watcher, Net.packBoard(side.board:snapshot()), {
+				matchId = self.id,
+				incoming = Attack.pending(side.board.incoming),
+			})
+		end
+	end
+end
 
 function MatchInstance:update(dt: number)
 	if self.finished or self.state ~= Enums.State.Playing then return end
@@ -296,16 +380,13 @@ function MatchInstance:update(dt: number)
 		if side.bot and side.alive then
 			side.bot:update(dt)
 			self:_drain(side)
-			-- Bots have no client, so the server produces their snapshots.
-			side.snapTimer = (side.snapTimer or 0) + dt
-			if side.snapTimer >= 1 / Tuning.SNAPSHOT_HZ then
-				side.snapTimer = 0
-				local packed = Net.packBoard(side.board:snapshot())
-				if side.other.player then
-					Remotes.Snapshot:FireClient(side.other.player, packed, { incoming = 0 })
-				end
-			end
 		end
+	end
+
+	self.snapTimer += dt
+	if self.snapTimer >= 1 / Tuning.SNAPSHOT_HZ then
+		self.snapTimer = 0
+		self:_publishSnapshots()
 	end
 
 	-- Two defensive players can otherwise sit there forever.
@@ -318,8 +399,9 @@ function MatchInstance:update(dt: number)
 			for _, side in ipairs({ self.a, self.b }) do
 				local gap = self.rng:NextInteger(1, Tuning.WIDTH)
 				side.board:queueGarbage(1, gap, self.elapsed)
-				if side.player then
-					Remotes.Garbage:FireClient(side.player, { rows = 1, gapCol = gap })
+				local p = client(side)
+				if p then
+					Remotes.Garbage:FireClient(p, { matchId = self.id, rows = 1, gapCol = gap })
 				end
 			end
 		end
@@ -337,11 +419,17 @@ end
 
 -- ── Ending ────────────────────────────────────────────────────────────────
 
+-- The Player reference deliberately survives a disconnect. Clearing it here was
+-- why leaving a ranked match cost nothing: recordMatch finds the profile that
+-- owes the loss through this field, so by the time it ran there was nobody left
+-- to charge, and the rating hit the comment there promises never happened. The
+-- `left` flag is what stops anything being fired at them. It holds a departed
+-- Player for at most RESULTS_TIME, until the match drops out of the list.
 function MatchInstance:playerLeft(player: Player)
 	local side = self:sideFor(player)
 	if not side or self.finished then return end
 	side.alive = false
-	side.player = nil
+	side.left = true
 	self:_finish(side, Enums.Result.Win, Enums.Result.Left)
 end
 
@@ -366,8 +454,20 @@ function MatchInstance:_finish(loser: any?, _winOutcome: string, reason: string?
 	self.finished = true
 	self.state = Enums.State.Results
 
+	-- Stats and rating are settled before the results go out, so the card can
+	-- show what this match did to a rating rather than what it was worth
+	-- beforehand. Guarded: a stats failure must not cost both players their
+	-- result screen as well.
+	if self.onFinished then
+		local ok, err = pcall(self.onFinished, self, loser, reason)
+		if not ok then
+			warn(("[Match %d] finish handler failed: %s"):format(self.id, tostring(err)))
+		end
+	end
+
 	for _, side in ipairs({ self.a, self.b }) do
-		if side.player then
+		local p = client(side)
+		if p then
 			local outcome
 			if loser == nil then
 				outcome = Enums.Result.Draw
@@ -376,19 +476,19 @@ function MatchInstance:_finish(loser: any?, _winOutcome: string, reason: string?
 			else
 				outcome = Enums.Result.Win
 			end
-			Remotes.Result:FireClient(side.player, {
+			Remotes.Result:FireClient(p, {
+				matchId = self.id,
 				outcome = outcome,
 				reason = reason,
 				stats = statsOf(side),
 				opponent = side.other.name,
+				-- Set by recordMatch, and only in ranked.
+				elo = side.elo,
+				rating = side.elo and side.elo.after or nil,
 				-- Nothing to rematch against if the other side walked out.
 				canRematch = reason ~= Enums.Result.Left,
 			})
 		end
-	end
-
-	if self.onFinished then
-		self.onFinished(self, loser, reason)
 	end
 end
 

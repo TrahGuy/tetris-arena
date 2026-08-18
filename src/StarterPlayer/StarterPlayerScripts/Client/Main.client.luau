@@ -52,7 +52,8 @@ backdrop.Parent = gui
 
 SoundKit.init()
 
-local SPRINT_GOAL = 40
+-- The server vets sprint records against this too, so it lives in Tuning.
+local SPRINT_GOAL = Tuning.SPRINT_GOAL
 
 local state = Enums.State.Idle
 local sim, input, fx = nil, nil, nil
@@ -110,6 +111,11 @@ local function startSim(seed: number, opts: any, info: any?)
 			if payload.info.combo > bestCombo then bestCombo = payload.info.combo end
 			if payload.info.lines >= 4 then
 				SoundKit.play("quad")
+			elseif payload.info.tspin and payload.info.lines > 0 then
+				-- No dedicated spin cue exists, and every id in Sound.luau comes
+				-- from a source Roblox licenses. This is the quad hit pitched
+				-- up: the same family, audibly not a quad.
+				SoundKit.play("quad", 1.3)
 			elseif payload.info.lines > 0 then
 				SoundKit.play("clear")
 			else
@@ -118,14 +124,21 @@ local function startSim(seed: number, opts: any, info: any?)
 		end
 		if matchInfo and matchInfo.networked then
 			Remotes.Lock:FireServer({
+				-- Every competitive message names its match. The server drops
+				-- anything addressed to a match it is no longer running.
+				matchId = matchInfo.matchId,
 				index = payload.index,
 				tick = payload.tick,
 				kind = payload.kind,
 				rot = payload.rot,
 				x = payload.x,
 				y = payload.y,
-				send = payload.send,
-				lines = payload.info and payload.info.lines or 0,
+				-- The rotation that placed the piece, which the server replays
+				-- on its own board to reach its own T-spin verdict. `send` and
+				-- `lines` used to ride along here; they were never read, and a
+				-- competitive number travelling from client to server is a
+				-- standing invitation to start trusting it.
+				spin = payload.spin,
 			})
 		end
 	end
@@ -139,10 +152,13 @@ local function startSim(seed: number, opts: any, info: any?)
 			fx:onKo(false)
 			hud:setOverlay("KO", Theme.C.red)
 			if matchInfo and matchInfo.networked then
-				Remotes.Lock:FireServer({ topout = true, reason = e.data.reason })
+				Remotes.Lock:FireServer({
+					matchId = matchInfo.matchId, topout = true, reason = e.data.reason,
+				})
 			elseif matchInfo and matchInfo.practice then
 				Remotes.Practice:FireServer({
 					finished = true,
+					sessionId = matchInfo.sessionId,
 					mode = matchInfo.mode,
 					stats = sim.board.stats,
 					time = os.clock() - matchStart,
@@ -168,7 +184,7 @@ local function startSim(seed: number, opts: any, info: any?)
 	input = InputController.new(sim, {
 		onForfeit = function()
 			if matchInfo and matchInfo.networked then
-				Remotes.Forfeit:FireServer()
+				Remotes.Forfeit:FireServer({ matchId = matchInfo.matchId })
 			else
 				teardownMatch()
 				setState(Enums.State.Idle)
@@ -239,6 +255,7 @@ Remotes.MatchUpdate.OnClientEvent:Connect(function(msg)
 	if msg.state == Enums.State.Countdown then
 		startSim(msg.seed, { gravity = msg.gravity }, {
 			networked = true,
+			matchId = msg.matchId,
 			opponent = msg.opponent,
 			isBot = msg.isBot,
 			mode = msg.mode,
@@ -270,19 +287,26 @@ Remotes.MatchUpdate.OnClientEvent:Connect(function(msg)
 	end
 end)
 
+-- Anything that touches the board has to be for the match on screen. A garbage
+-- line or a resync from the match before this one would land on a board that
+-- never earned it.
+local function forThisMatch(msg: any): boolean
+	return matchInfo ~= nil and matchInfo.networked == true
+		and type(msg) == "table" and msg.matchId == matchInfo.matchId
+end
+
 Remotes.Garbage.OnClientEvent:Connect(function(msg)
-	if sim then
+	if sim and forThisMatch(msg) then
 		sim.board:queueGarbage(msg.rows, msg.gapCol)
 	end
 end)
 
 Remotes.Snapshot.OnClientEvent:Connect(function(packed, meta)
 	if state ~= Enums.State.Playing and state ~= Enums.State.Countdown then return end
+	if not forThisMatch(meta) then return end
 	local cells = Net.unpackBoard(packed, Tuning.WIDTH * Tuning.VISIBLE)
 	hud:renderOpponent(cells)
-	if meta then
-		hud:setOpponentStatus(("%d incoming"):format(meta.incoming or 0))
-	end
+	hud:setOpponentStatus(("%d incoming"):format(math.floor(tonumber(meta.incoming) or 0)))
 end)
 
 -- The server disagreed with our board. Snap to its version rather than kick:
@@ -293,7 +317,7 @@ end)
 -- play", and a stale index means every following lock is "out of order" — so a
 -- resync that only fixed cells would leave the player permanently rejected.
 Remotes.Resync.OnClientEvent:Connect(function(msg)
-	if not sim then return end
+	if not sim or not forThisMatch(msg) then return end
 	local b = sim.board
 	for i = 1, #msg.cells do
 		b.cells[i] = msg.cells[i]
@@ -307,7 +331,12 @@ Remotes.Resync.OnClientEvent:Connect(function(msg)
 	if fx then fx:flashScreen(Theme.C.gold, 0.25) end
 end)
 
+-- Deliberately looser than forThisMatch: a result is the end of a match, not a
+-- change to a board, and dropping one leaves the player staring at a dead
+-- screen. Only an explicit mismatch — a result for a match we have already left
+-- behind — is ignored.
 Remotes.Result.OnClientEvent:Connect(function(payload)
+	if matchInfo and matchInfo.networked and payload.matchId ~= matchInfo.matchId then return end
 	if input then input:disable() end
 	if fx then fx:onKo(payload.outcome == Enums.Result.Win) end
 	SoundKit.setMusic("musicLobby")
@@ -321,7 +350,11 @@ end)
 
 Remotes.Practice.OnClientEvent:Connect(function(msg)
 	if msg.seed then
-		startSim(msg.seed, { gravity = msg.gravity }, { practice = true, mode = msg.mode })
+		-- The session id goes back with the result: the server times the run
+		-- from when it issued this seed.
+		startSim(msg.seed, { gravity = msg.gravity }, {
+			practice = true, mode = msg.mode, sessionId = msg.sessionId,
+		})
 		hud:setOpponentVisible(false)
 		setState(Enums.State.Playing)
 		hud:setOverlay("GO")
@@ -398,7 +431,8 @@ RunService.RenderStepped:Connect(function(dt)
 			matchInfo.done = true
 			if input then input:disable() end
 			Remotes.Practice:FireServer({
-				finished = true, mode = Enums.Mode.Sprint, stats = b.stats, time = elapsed,
+				finished = true, sessionId = matchInfo.sessionId,
+				mode = Enums.Mode.Sprint, stats = b.stats, time = elapsed,
 			})
 			SoundKit.play("go")
 			hud:setOverlay(string.format("%.2fs", elapsed), Theme.C.cy)
@@ -417,9 +451,12 @@ RunService.RenderStepped:Connect(function(dt)
 		local now = os.clock()
 		if now - lastSnapshot >= 1 / Tuning.SNAPSHOT_HZ then
 			lastSnapshot = now
+			-- Not what the opponent sees — the server draws that from its own
+			-- shadow. This is the divergence probe: the server compares it to
+			-- the shadow and resyncs us if they have drifted apart.
 			Remotes.Lock:FireServer({
+				matchId = matchInfo.matchId,
 				snapshot = Net.packBoard(b:snapshot()),
-				incoming = Attack.pending(b.incoming),
 			})
 		end
 	end

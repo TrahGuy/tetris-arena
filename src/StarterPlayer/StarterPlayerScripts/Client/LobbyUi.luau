@@ -7,12 +7,14 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
+local Pieces = require(Shared.Pieces)
 
 local LobbyUi = {}
 LobbyUi.__index = LobbyUi
@@ -392,8 +394,15 @@ function LobbyUi:showResults(payload: any, canRematch: boolean)
 		self.resultSub.Text = reasons[payload.reason]
 			or (win and "Opponent topped out." or "You topped out.")
 	end
+	-- Ranked only. A rating that moved without being shown is a rating players
+	-- assume is broken, and the disconnect case is exactly where they look.
+	if payload.elo then
+		self.resultSub.Text = ("%s   ·   %d ELO (%+d)"):format(
+			self.resultSub.Text, payload.elo.after, payload.elo.delta)
+	end
 	if payload.rating then
 		self.rating = payload.rating
+		self:setPlayerCount(self.playerCount or 1)
 	end
 	local s = payload.stats or {}
 	self.resultStats["LINES"].Text = tostring(s.lines or 0)

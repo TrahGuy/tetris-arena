@@ -14,6 +14,7 @@ local Services = script.Parent
 local RateLimiter = require(Services.RateLimiter)
 local Matchmaking = require(Services.MatchmakingService)
 local Stats = require(Services.StatsService)
+local Practice = require(Services.PracticeService)
 
 Matchmaking.setStatsService(Stats)
 
@@ -49,9 +50,9 @@ Remotes.Lock.OnServerEvent:Connect(function(player, msg)
 	Matchmaking.onLock(player, msg)
 end)
 
-Remotes.Forfeit.OnServerEvent:Connect(function(player)
+Remotes.Forfeit.OnServerEvent:Connect(function(player, msg)
 	if not limits.ui:allow(player) then return end
-	Matchmaking.forfeit(player)
+	Matchmaking.forfeit(player, msg)
 end)
 
 Remotes.SaveSettings.OnServerEvent:Connect(function(player, msg)
@@ -59,21 +60,38 @@ Remotes.SaveSettings.OnServerEvent:Connect(function(player, msg)
 	Stats.applySettings(player, msg)
 end)
 
--- Practice is local to the client: the server only issues a seed and records
--- the result, because there is nothing to cheat at when nobody is opposing you.
+-- Practice runs on the client, but the result is not taken on trust: it goes
+-- to a sprint record and a lines total that both show on the leaderboard.
+-- PracticeService issues the session and vets what comes back against the wall
+-- clock it measured.
 Remotes.Practice.OnServerEvent:Connect(function(player, msg)
 	if not limits.ui:allow(player) then return end
 	if type(msg) ~= "table" then return end
 	if msg.finished then
-		Stats.recordPractice(player, msg.mode or Enums.Mode.Practice, msg.stats,
-			tonumber(msg.time) or 0)
+		-- Nobody finishes a practice run from inside a match.
+		if Matchmaking.matchFor(player) then return end
+		local record, why = Practice.finish(player, msg, os.clock())
+		if not record then
+			-- "no session" is just a duplicate or late submission; the rest are
+			-- worth seeing.
+			if why ~= "no session" then
+				warn(("[Practice] discarded a result from %s: %s"):format(
+					player.Name, tostring(why)))
+			end
+			return
+		end
+		Stats.recordPractice(player, record)
 		Stats.refreshLeaderboard()
 		return
 	end
-	if Matchmaking.matchFor(player) then return end
+	-- A practice board must not overlap a real one in either direction, or the
+	-- same stretch of wall clock backs two runs.
+	if Matchmaking.matchFor(player) or Matchmaking.isQueued(player) then return end
+	local session = Practice.begin(player, msg.mode, os.clock())
 	Remotes.Practice:FireClient(player, {
-		seed = math.random(1, 2 ^ 31 - 1),
-		mode = msg.mode or Enums.Mode.Practice,
+		sessionId = session.id,
+		seed = session.seed,
+		mode = session.mode,
 		gravity = Tuning.GRAVITY,
 	})
 end)
@@ -86,7 +104,10 @@ Players.PlayerAdded:Connect(function(player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
+	-- Before the release below: playerLeaving settles the match, and the loss
+	-- and the rating need the profile to still be loaded.
 	Matchmaking.playerLeaving(player)
+	Practice.forget(player)
 	for _, limiter in pairs(limits) do
 		limiter:forget(player)
 	end

@@ -14,12 +14,20 @@ Attack.PERFECT_CLEAR = 10
 
 Attack.NONE, Attack.SINGLE, Attack.DOUBLE, Attack.TRIPLE, Attack.QUAD = 0, 1, 2, 3, 4
 
--- T-spins are detected and displayed in v1 but score nothing. That gives real
--- data to tune against without taking on the balance risk before the base game
--- is proven.
-Attack.TSPIN_ENABLED = false
-local TSPIN = { 0, 2, 4, 6 }
-local TSPIN_MINI = { 0, 0, 1, 2 }
+-- T-spins pay out as of Phase 11. They were detected and displayed but scored
+-- nothing until the base game was proven, and until the server could derive one
+-- for itself — see Board.verifySpin.
+Attack.TSPIN_ENABLED = true
+
+-- Indexed by LINES + 1, so entry one is a spin that cleared nothing. That is
+-- not a stylistic choice: read as { single, double, triple, quad } the way BASE
+-- is, these tables pay a T-spin single nothing, a double 2, a triple 4, and
+-- reserve 6 for a four-line T-spin that a three-wide piece cannot produce —
+-- a dead entry and a worthless single. Read from zero they are exactly the
+-- guideline values, 2 / 4 / 6, with the 0-line spin the table plainly starts
+-- with. The second reading is the one that makes every entry mean something.
+local TSPIN = { 0, 2, 4, 6 }        -- 0, 1, 2, 3 lines
+local TSPIN_MINI = { 0, 0, 1, 2 }   -- a mini single is deliberately worth nothing
 
 export type ClearInfo = {
 	lines: number,
@@ -51,9 +59,10 @@ function Attack.compute(lines: number, tspin: string?, perfect: boolean, b2b: bo
 		return info
 	end
 
+	-- A T-spin is paid INSTEAD of the base clear, never on top of it.
 	local n = 0
 	if tspin and Attack.TSPIN_ENABLED then
-		n = (tspin == "mini" and TSPIN_MINI or TSPIN)[math.min(lines, 4)] or 0
+		n = (tspin == "mini" and TSPIN_MINI or TSPIN)[math.min(lines, 3) + 1] or 0
 	else
 		n = BASE[math.min(lines, 4)] or 0
 	end
