@@ -7,14 +7,12 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
-local Pieces = require(Shared.Pieces)
 
 local LobbyUi = {}
 LobbyUi.__index = LobbyUi

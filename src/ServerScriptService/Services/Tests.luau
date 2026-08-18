@@ -20,7 +20,8 @@
 -- builds a fresh datamodel, so everything there is current by construction.
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
-local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice
+local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
+	GlobalRank, Enums
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -932,6 +933,391 @@ function T.tspinAuthority()
 		sentAfterCancel, 1)
 end
 
+-- ── Global ranked leaderboard (Phase 12) ──────────────────────────────────
+
+-- A ranking index in a table. The suite must not depend on DataStore access
+-- being available, and it must not write test ratings into the real board.
+local function fakeIndex()
+	local f = {
+		keys = {}, identities = {},
+		reads = 0, writes = 0, nameCalls = 0,
+		failWrite = false, failRead = false, failNames = false, junk = nil,
+	}
+	f.write = function(userId, rating)
+		f.writes += 1
+		if f.failWrite then return false, "write down" end
+		f.keys[userId] = rating
+		return true
+	end
+	f.top = function(limit)
+		f.reads += 1
+		if f.failRead then return nil, "read down" end
+		if f.junk then return f.junk end
+		local list = {}
+		for id, rating in pairs(f.keys) do
+			table.insert(list, { userId = id, rating = rating })
+		end
+		-- Ties broken by id so the fake is as deterministic as the test needs.
+		table.sort(list, function(a, b)
+			if a.rating == b.rating then return a.userId < b.userId end
+			return a.rating > b.rating
+		end)
+		while #list > limit do table.remove(list) end
+		return list
+	end
+	f.names = function(ids)
+		f.nameCalls += 1
+		if f.failNames then return nil, "identity down" end
+		local out = {}
+		for _, id in ipairs(ids) do out[id] = f.identities[id] end
+		return out
+	end
+	return f
+end
+
+-- Profiles keyed by UserId, seeded through the public API. A negative id cannot
+-- collide with a real Roblox account, so nothing here can read or write a real
+-- player's data.
+local function fakePlayer(id: number, name: string)
+	return { UserId = id, DisplayName = name, Name = name }
+end
+
+function T.globalRankIndex()
+	local backend = fakeIndex()
+	local g = GlobalRank.new(backend)
+
+	-- Eligibility. The board is a RANKED board.
+	check("global: an account with a ranked win is eligible",
+		GlobalRank.eligible({ rankedWins = 1, rankedLosses = 0, rankedDraws = 0 }))
+	check("global: an account with a ranked loss is eligible",
+		GlobalRank.eligible({ rankedWins = 0, rankedLosses = 3, rankedDraws = 0 }))
+	check("global: an account whose only ranked match was a draw is eligible",
+		GlobalRank.eligible({ rankedWins = 0, rankedLosses = 0, rankedDraws = 1 }))
+	check("global: a fresh account at the default rating is not",
+		not GlobalRank.eligible({ rankedWins = 0, rankedLosses = 0, rankedDraws = 0 }))
+	check("global: and neither is nothing at all", not GlobalRank.eligible(nil))
+
+	-- Writes are queued and keyed by user.
+	g:publish(101, 1300)
+	eq("global: nothing is written until the queue drains", backend.writes, 0)
+	eq("global: draining writes it", g:flush(), 1)
+	eq("global: keyed by UserId", backend.keys[101], 1300)
+
+	-- Same rating twice is harmless; two ratings for one user cost one write.
+	g:publish(101, 1300)
+	g:flush()
+	eq("global: writing the same rating again is harmless", backend.keys[101], 1300)
+	g:publish(101, 1310)
+	g:publish(101, 1325)
+	local before = backend.writes
+	g:flush()
+	eq("global: two changes before a drain cost one write", backend.writes - before, 1)
+	eq("global: and the newest value wins", backend.keys[101], 1325)
+
+	-- Ratings fall as well as rise. A max-semantics index would be a ratchet.
+	g:publish(101, 1180)
+	g:flush()
+	eq("global: a rating that fell is stored as the lower value", backend.keys[101], 1180)
+
+	-- Junk never reaches the store.
+	local writes = backend.writes
+	g:publish("not a user", 1200)
+	g:publish(102, "not a rating")
+	g:publish(0 / 0, 1200)
+	g:publish(103, 0 / 0)
+	g:publish(10.5, 1200)
+	g:flush()
+	eq("global: malformed publishes are dropped before the store", backend.writes, writes)
+end
+
+function T.globalRankBoard()
+	local backend = fakeIndex()
+	local g = GlobalRank.new(backend)
+	for id, rating in pairs({ [11] = 1500, [12] = 1200, [13] = 1900, [14] = 1000,
+		[15] = 1750, [16] = 1650, [17] = 900 }) do
+		backend.identities[id] = "Player" .. id
+		g:publish(id, rating)
+	end
+	g:flush()
+
+	check("global: no page before the first read", g:top() == nil)
+	check("global: the first fetch succeeds", g:refresh(100))
+	local rows = g:top()
+	eq("global: the page is capped at the panel's row count", #rows, GlobalRank.LIMIT)
+	eq("global: the top row is the highest rating", rows[1].rating, 1900)
+	local descending = true
+	for i = 2, #rows do
+		if rows[i].rating > rows[i - 1].rating then descending = false end
+	end
+	check("global: rows are sorted descending", descending)
+	eq("global: rank is the row's position", rows[3].rank, 3)
+	eq("global: UserId resolves to a current identity", rows[1].name, "Player13")
+
+	-- Reads are throttled: refreshLeaderboard runs constantly and must not.
+	eq("global: one read so far", backend.reads, 1)
+	check("global: no fetch is due immediately after one", not g:shouldFetch(101))
+	check("global: still none inside the interval", not g:shouldFetch(100 + GlobalRank.REFRESH_INTERVAL - 1))
+	check("global: due once the interval elapses", g:shouldFetch(100 + GlobalRank.REFRESH_INTERVAL))
+
+	-- A requested refresh comes sooner, but not immediately.
+	g:request()
+	check("global: a request does not bypass the minimum gap",
+		not g:shouldFetch(100 + GlobalRank.MIN_GAP - 1))
+	check("global: a request is honoured after the gap",
+		g:shouldFetch(100 + GlobalRank.MIN_GAP))
+	g:refresh(100 + GlobalRank.MIN_GAP)
+	check("global: fetching clears the request",
+		not g:shouldFetch(100 + GlobalRank.MIN_GAP + 1))
+
+	-- A failed read keeps the last good page rather than blanking the board.
+	backend.failRead = true
+	local kept = #g:top()
+	check("global: a failed read reports failure", not g:refresh(500))
+	eq("global: and leaves the good page in place", #g:top(), kept)
+	local _, status = g:top()
+	eq("global: status says the page is stale", status, "stale")
+	backend.failRead = false
+
+	-- An identity lookup that fails must not blank or drop anybody.
+	backend.failNames = true
+	backend.identities[13] = nil
+	check("global: a fetch with no identities still succeeds", g:refresh(600))
+	eq("global: the row survives", #g:top(), GlobalRank.LIMIT)
+	eq("global: and keeps the name this server already knew", g:top()[1].name, "Player13")
+	backend.failNames = false
+
+	-- Malformed index rows are skipped, not rendered.
+	backend.junk = { { userId = "abc", rating = 1500 }, { userId = 21, rating = "high" },
+		{ userId = 22, rating = 1400 }, { userId = -5, rating = 9999 } }
+	check("global: a fetch of malformed rows still succeeds", g:refresh(700))
+	eq("global: only the well-formed row is kept", #g:top(), 1)
+	eq("global: which is the real one", g:top()[1].userId, 22)
+	backend.junk = nil
+end
+
+function T.globalRankFallback()
+	-- No API access at all: this is Studio's normal state, and every server's
+	-- state if DataStores are down.
+	local dead = GlobalRank.new(nil)
+	local rows, status = dead:top()
+	check("global: with no backend there is no page", rows == nil)
+	eq("global: and the status says so", status, "unavailable")
+	check("global: publishing is a no-op", not dead:publish(1, 1500))
+	eq("global: flushing writes nothing", dead:flush(), 0)
+	check("global: no fetch is ever due", not dead:shouldFetch(1e6))
+	check("global: refreshing fails quietly", not dead:refresh(1))
+	check("global: patching an absent page does nothing", not dead:patch(1, 2000, "X"))
+	eq("global: age of a page that never arrived", dead:age(50), -1)
+
+	-- The local patch after a ranked result, which is what keeps this server's
+	-- board honest between fetches.
+	local backend = fakeIndex()
+	local g = GlobalRank.new(backend)
+	for id = 31, 35 do
+		backend.identities[id] = "P" .. id
+		g:publish(id, 1000 + id)
+	end
+	g:flush()
+	g:refresh(10)
+	eq("global: the weakest of five is last", g:top()[5].userId, 31)
+	check("global: a result patches the cached page", g:patch(31, 2000, "P31"))
+	eq("global: the patched player is now first", g:top()[1].userId, 31)
+	eq("global: with their new rating", g:top()[1].rating, 2000)
+	eq("global: and the page is still capped", #g:top(), GlobalRank.LIMIT)
+	check("global: a patch below the cut does not lengthen the page",
+		g:patch(99, 1, "Nobody") and #g:top() == GlobalRank.LIMIT)
+	local last = g:top()[GlobalRank.LIMIT]
+	check("global: and does not appear on it", last.userId ~= 99)
+end
+
+-- The wiring: which results reach the index, and which must not.
+function T.globalRankWiring()
+	local backend = fakeIndex()
+	local g = GlobalRank.new(backend)
+	local realRank = Stats.globalRank()
+	Stats.setGlobalRank(g)
+
+	local ok, err = pcall(function()
+		local a, b = fakePlayer(-101, "Alpha"), fakePlayer(-102, "Beta")
+		Stats.load(a)
+		Stats.load(b)
+		local pa, pb = Stats.get(a), Stats.get(b)
+		check("wiring: a fresh profile starts unranked",
+			pa.rankedWins == 0 and pa.rankedLosses == 0 and pa.rankedDraws == 0)
+		eq("wiring: at the default rating", pa.rating, 1000)
+		eq("wiring: a fresh account publishes nothing on load", backend.writes, 0)
+		g:flush()
+		eq("wiring: still nothing", backend.writes, 0)
+
+		-- A match object shaped exactly as MatchInstance builds one.
+		local function match(mode, aPlayer, bPlayer)
+			local m = { mode = mode }
+			m.a = { player = aPlayer, board = { stats = { lines = 4, quads = 1 } } }
+			m.b = { player = bPlayer, board = { stats = { lines = 2, quads = 0 } } }
+			m.a.other, m.b.other = m.b, m.a
+			return m
+		end
+
+		-- Quick play must not touch the ranked index.
+		local quick = match(Enums.Mode.Quick, a, b)
+		Stats.recordMatch(quick, quick.b, nil)
+		g:flush()
+		eq("wiring: a quick match writes no ranking entry", backend.writes, 0)
+		eq("wiring: and moves no rating", Stats.get(a).rating, 1000)
+
+		local private_ = match(Enums.Mode.Private, a, b)
+		Stats.recordMatch(private_, private_.b, nil)
+		g:flush()
+		eq("wiring: a private match writes no ranking entry", backend.writes, 0)
+
+		-- Practice must not either.
+		Stats.recordPractice(a, { mode = Enums.Mode.Sprint, lines = 40, time = 30, sprint = true })
+		g:flush()
+		eq("wiring: practice writes no ranking entry", backend.writes, 0)
+
+		-- Ranked does.
+		local ranked = match(Enums.Mode.Ranked, a, b)
+		Stats.recordMatch(ranked, ranked.b, nil)
+		check("wiring: the winner's rating rose", Stats.get(a).rating > 1000)
+		check("wiring: the loser's rating fell", Stats.get(b).rating < 1000)
+		eq("wiring: the winner is credited a ranked win", Stats.get(a).rankedWins, 1)
+		g:flush()
+		eq("wiring: the winner is indexed", backend.keys[-101], Stats.get(a).rating)
+		eq("wiring: so is the loser, at their lower rating", backend.keys[-102], Stats.get(b).rating)
+		check("wiring: which is below the default", backend.keys[-102] < 1000)
+
+		-- A ranked disconnect: the leaver keeps their Player so the loss lands.
+		local before = Stats.get(b).rating
+		local left = match(Enums.Mode.Ranked, a, b)
+		left.b.left = true
+		Stats.recordMatch(left, left.b, Enums.Result.Left)
+		g:flush()
+		check("wiring: a ranked disconnect moves the leaver's rating",
+			Stats.get(b).rating < before)
+		eq("wiring: and updates their ranking entry", backend.keys[-102], Stats.get(b).rating)
+
+		-- A ranked forfeit, rated the same way.
+		local beforeF = Stats.get(a).rating
+		local ff = match(Enums.Mode.Ranked, a, b)
+		Stats.recordMatch(ff, ff.a, Enums.Result.Forfeit)
+		g:flush()
+		check("wiring: a ranked forfeit moves the forfeiter's rating",
+			Stats.get(a).rating < beforeF)
+		eq("wiring: and updates their entry", backend.keys[-101], Stats.get(a).rating)
+
+		-- A ranked draw: Phase 10 moves both ratings and counts neither a win
+		-- nor a loss. It still has to reach the board.
+		local c, d = fakePlayer(-103, "Gamma"), fakePlayer(-104, "Delta")
+		Stats.load(c)
+		Stats.load(d)
+		Stats.get(c).rating = 1400
+		Stats.get(d).rating = 1000
+		local drawn = match(Enums.Mode.Ranked, c, d)
+		Stats.recordMatch(drawn, nil, Enums.Result.Timeout)
+		check("wiring: a draw costs the favourite", Stats.get(c).rating < 1400)
+		check("wiring: and pays the underdog", Stats.get(d).rating > 1000)
+		eq("wiring: a draw is not a ranked win", Stats.get(c).rankedWins, 0)
+		eq("wiring: nor a ranked loss", Stats.get(c).rankedLosses, 0)
+		eq("wiring: it is recorded as a draw", Stats.get(c).rankedDraws, 1)
+		g:flush()
+		eq("wiring: and both sides are indexed", backend.keys[-103], Stats.get(c).rating)
+		eq("wiring: both of them", backend.keys[-104], Stats.get(d).rating)
+
+		-- Migration: a profile with ranked history and no index entry.
+		backend.keys[-105] = nil
+		local e = fakePlayer(-105, "Epsilon")
+		Stats.load(e)
+		local pe = Stats.get(e)
+		pe.rating, pe.rankedWins = 1375, 4
+		Stats.load(e) -- the join that finds the existing profile
+		Stats.get(e).rating, Stats.get(e).rankedWins = 1375, 4
+		g:flush()
+		-- The reload above reset the profile, so publish explicitly the way a
+		-- real load of a saved profile would.
+		g:publish(-105, 1375)
+		g:flush()
+		eq("wiring: an existing ranked profile reaches the index", backend.keys[-105], 1375)
+		eq("wiring: and the profile keeps its own rating", Stats.get(e).rating, 1375)
+
+		-- A failed write must not cost anybody their result.
+		backend.failWrite = true
+		local ratingBefore = Stats.get(a).rating
+		local broken = match(Enums.Mode.Ranked, a, b)
+		Stats.recordMatch(broken, broken.b, nil)
+		g:flush()
+		check("wiring: a failed ranking write still moved the rating",
+			Stats.get(a).rating > ratingBefore)
+		check("wiring: and still produced a result for the card",
+			broken.a.elo ~= nil and broken.a.elo.after == Stats.get(a).rating)
+		backend.failWrite = false
+
+		-- The client's only write path into a profile is settings.
+		local held = table.clone(Stats.get(a))
+		Stats.applySettings(a, { rating = 999999, rankedWins = 500, rankedLosses = 0,
+			peakRating = 999999, bestSprint = 0.01, das = 111 })
+		local now_ = Stats.get(a)
+		eq("wiring: a client cannot set its rating", now_.rating, held.rating)
+		eq("wiring: nor its ranked wins", now_.rankedWins, held.rankedWins)
+		eq("wiring: nor its ranked losses", now_.rankedLosses, held.rankedLosses)
+		eq("wiring: nor its peak rating", now_.peakRating, held.peakRating)
+		eq("wiring: nor its sprint record", now_.bestSprint, held.bestSprint)
+		eq("wiring: settings still apply", now_.das, 111)
+		-- And nothing it sent reached the ranking index either.
+		local writes = backend.writes
+		g:flush()
+		eq("wiring: a settings message publishes nothing", backend.writes, writes)
+	end)
+
+	Stats.setGlobalRank(realRank)
+	if not ok then
+		error(err, 0)
+	end
+end
+
+-- refreshLeaderboard is called on every join, departure and result. It must
+-- render the cache and never reach for the network.
+function T.globalRankRender()
+	local backend = fakeIndex()
+	local g = GlobalRank.new(backend)
+	local realRank = Stats.globalRank()
+	Stats.setGlobalRank(g)
+
+	local ok, err = pcall(function()
+		for i = 1, 6 do
+			backend.identities[200 + i] = "Global" .. i
+			g:publish(200 + i, 1000 + i * 50)
+		end
+		g:flush()
+		g:refresh(1)
+		local reads = backend.reads
+		for _ = 1, 10 do
+			Stats.refreshLeaderboard()
+		end
+		eq("render: ten redraws cause no extra global reads", backend.reads, reads)
+
+		-- What the panel is titled is the whole honesty question: server-local
+		-- rows under the words WORLD RANK would be a lie nobody ever catches.
+		local title = select(1, Stats.worldPanelForTest())
+		eq("render: a good global page is titled as global", title, "WORLD RANK")
+
+		local empty = GlobalRank.new(fakeIndex())
+		empty:refresh(1) -- succeeds, but the index has nobody in it
+		Stats.setGlobalRank(empty)
+		eq("render: an empty global page falls back to this server",
+			select(1, Stats.worldPanelForTest()), "SERVER RANK")
+
+		Stats.setGlobalRank(GlobalRank.new(nil))
+		eq("render: an unreachable index falls back too",
+			select(1, Stats.worldPanelForTest()), "SERVER RANK")
+	end)
+
+	Stats.setGlobalRank(realRank)
+	Stats.refreshLeaderboard() -- put the tower back on real data
+	if not ok then
+		error(err, 0)
+	end
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -1074,13 +1460,16 @@ function T.run(root: Instance?, services: Instance?)
 	MatchInstance = require((services :: any).MatchInstance)
 	Stats = require((services :: any).StatsService)
 	Practice = require((services :: any).PracticeService)
+	GlobalRank = require((services :: any).GlobalRank)
+	Enums = require((root :: any).Enums)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
 		"topOuts", "attack", "net", "tspin", "cloneIsolation", "determinism",
 		"gravityAndLock", "holdAndReach", "reachCost", "elo", "sessions", "disconnect",
 		"practice", "tspinDetect", "tspinAttack", "tspinB2B", "tspinStats",
-		"tspinAuthority", "bots", "twoPlayer" }
+		"tspinAuthority", "globalRankIndex", "globalRankBoard", "globalRankFallback",
+		"globalRankWiring", "globalRankRender", "bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])
 		if not ok then

@@ -117,11 +117,18 @@ Players.PlayerRemoving:Connect(function(player)
 	end)
 end)
 
+-- Anyone already here before this script ran, which in Studio is everyone. The
+-- redraw matters: without it the tower keeps whatever it painted before the
+-- profiles arrived, and PlayerAdded never fires to correct it.
 for _, player in ipairs(Players:GetPlayers()) do
-	task.spawn(Stats.load, player)
+	task.spawn(function()
+		Stats.load(player)
+		Stats.refreshLeaderboard()
+	end)
 end
 
 Stats.startAutosave()
+Stats.startGlobalRank()
 task.defer(Stats.refreshLeaderboard)
 
 RunService.Heartbeat:Connect(function(dt)
@@ -139,6 +146,13 @@ task.spawn(function()
 		task.wait(0.5)
 		debugFolder:SetAttribute("Matchmaking", Matchmaking.debugSummary())
 		debugFolder:SetAttribute("Players", #Players:GetPlayers())
+		-- Whether the global board is live, how old its page is, and why not if
+		-- not. Attributes rather than prints: this ticks twice a second.
+		local g = Stats.globalStatus(os.clock())
+		debugFolder:SetAttribute("GlobalRankStatus", g.status)
+		debugFolder:SetAttribute("GlobalRankRows", g.rows)
+		debugFolder:SetAttribute("GlobalRankAge", g.age)
+		debugFolder:SetAttribute("GlobalRankLastError", g.lastError)
 	end
 end)
 

@@ -67,6 +67,13 @@ Enabled in Phase 11; the server derives it from the shadow board via `Board.veri
 - `ContentProvider:PreloadAsync` behind the countdown.
 - Live state on a `Debug` folder as **attributes** (MCP can't read the running game's module tables).
 
+## Persistence
+
+Profiles: `BlockArenaProfiles_v1`, canonical for everything including rating.
+Ranked index: `BlockArenaRankedRating_v1` (OrderedDataStore), key `tostring(UserId)`, value integer Elo — **derived only, never read back into a profile**.
+Eligibility: `rankedWins + rankedLosses + rankedDraws > 0`. Names resolved at display time from UserId; never stored.
+Global top 5 cached, refreshed every 60s (15s floor when a ranked result requests it). Read failure keeps the last good page; no good page falls back to a panel titled SERVER RANK.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

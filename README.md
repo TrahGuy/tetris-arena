@@ -31,6 +31,7 @@ open at that path). Move it in here when convenient.
 | 9 — Mobile touch / gamepad | done |
 | 10 — Competitive hardening | done |
 | 11 — T-spin scoring and attack | done |
+| 12 — Global ranked leaderboard | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -59,7 +60,7 @@ description — so swap any that sound wrong. One line each.
 | A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
 | Museum skins are display-only | No cosmetic ownership system. Board skins are the natural monetisation here and the renderer is built so a skin is a palette swap plus an effect hook — but nothing owns, sells or equips one. |
 | Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
-| Leaderboard is server-local | It ranks whoever is in this server. A global one needs OrderedDataStores and a moderation story for names. |
+| WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
 | Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
 | Never tested with two live humans | Studio over MCP drives one client. `Tests.twoPlayer` covers the path headlessly: two stand-in clients run their own boards and report locks exactly as `Main.client` does, with garbage and resync mirrored back the way the remotes deliver them. |
 
@@ -139,9 +140,65 @@ player's own rotation would have set, and detection proceeds from the server's
 board as usual. Nothing else about the spin comes off the wire; `send` and
 `lines` were removed from the lock payload entirely.
 
+## Global ranked leaderboard
+
+**WORLD RANK is global.** A ranked result in any server moves both ratings, each
+one is written to an ordered index, and every other server's tower reads that
+index — the player does not have to be present, or online, to be on it.
+
+| | |
+| --- | --- |
+| Canonical profile | `BlockArenaProfiles_v1` — rating included |
+| Ranking index | `BlockArenaRankedRating_v1`, an OrderedDataStore |
+| Key | `tostring(UserId)` |
+| Value | integer Elo, nothing else |
+| Refresh | 60s, or 15s when a ranked result asks for one |
+| Rows | top 5, matching the panel |
+
+The index is **derived, never canonical**. Nothing reads a rating out of it into
+a player's profile; an OrderedDataStore holds one number per key, so it can rank
+but it cannot own. If the two disagree the profile is right and the index is
+stale, which the player's next join or next ranked result corrects — `load`
+republishes what the profile says every time, so drift heals on its own.
+
+**Who is on it.** Only accounts with ranked history: `rankedWins + rankedLosses
++ rankedDraws > 0`. A fresh account sits at the default 1000, and a ranked board
+full of players who have never ranked would be a board about nothing. Draws
+count, because a ranked draw moves both ratings — Phase 12 added `rankedDraws`
+to the profile for exactly this, since Phase 10 moved the ratings without
+recording that the match happened.
+
+**Names are not stored.** The index holds UserId and a number. Identities are
+resolved at display time through `UserService:GetUserInfosByUserIdsAsync`, so a
+renamed player shows their current name, no user-authored text is ever written
+into leaderboard storage, and there is no second name database to moderate. A
+failed lookup falls back to the last identity this server saw, then to a dash —
+never to dropping the row.
+
+**Nothing waits on it.** Rating writes are queued and drained by one background
+task; a match never blocks on a DataStore. Reads happen on their own clock, and
+`refreshLeaderboard` — which runs on every join, departure and result — only
+renders the cache. A failed read keeps the last good page rather than blanking
+the board. A failed write is dropped, because the next result or join will
+republish it anyway.
+
+**The fallback does not lie.** With no good global page — API access off, the
+index unreachable, or nobody ranked yet — the panel shows this server's players
+under the title **SERVER RANK**. Server-local rows under the words WORLD RANK
+would be the kind of wrong nobody ever catches, because it looks exactly like
+the truth. `ServerStorage.Debug` carries `GlobalRankStatus`, `GlobalRankRows`,
+`GlobalRankAge` and `GlobalRankLastError` for checking which state a live server
+is in.
+
+**Eventual consistency.** A server patches its own cached page from a ranked
+result it just settled, so the player who takes first place sees it immediately;
+other servers see it within a refresh. The profile store deliberately has no
+session locking, so one account playing on two servers at once can still write
+the index twice — last writer wins, and the next join corrects it.
+
 ## Tests
 
-290 assertions. **Run them in Play mode, from the Server datamodel:**
+381 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()

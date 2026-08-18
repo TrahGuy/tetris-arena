@@ -19,6 +19,7 @@ local Shared = ReplicatedStorage:WaitForChild("Shared")
 local Theme = require(Shared.Theme)
 local Enums = require(Shared.Enums)
 local Remotes = require(Shared.Remotes)
+local GlobalRank = require(script.Parent.GlobalRank)
 
 local StatsService = {}
 
@@ -27,10 +28,20 @@ local store = nil
 local profiles: { [number]: any } = {}
 local dirty: { [number]: boolean } = {}
 
+-- The global ranked index. Derived from the profiles below, never the other way
+-- round: nothing in this file ever reads a rating out of it.
+local global = GlobalRank.new(GlobalRank.liveBackend())
+
 local DEFAULT = {
 	wins = 0, losses = 0, streak = 0, bestStreak = 0,
 	lines = 0, quads = 0, matches = 0, bestSprint = 0,
 	rating = 1000, peakRating = 1000, rankedWins = 0, rankedLosses = 0,
+	-- Ranked draws were already possible — the clock running out on equal
+	-- garbage — and already moved both ratings, but nothing recorded that the
+	-- match happened. Without this, a player whose only ranked game was a draw
+	-- has a rating a ranked result produced and no evidence they ever ranked,
+	-- which is exactly the account the global board has to decide about.
+	rankedDraws = 0,
 	das = 133, arr = 0, music = 60, sfx = 80, colourblind = false,
 }
 
@@ -67,8 +78,14 @@ function StatsService.elo(ratingW: number, ratingL: number, playedW: number, pla
 end
 
 -- Applies the change and reports what each rating did, so the result card can
--- show it. Draws do not count toward either player's match total: the K factor
--- is meant to settle as a player is placed, and a draw places nobody.
+-- show it. Draws still do not count toward the K factor's match total — that is
+-- meant to settle as a player is placed, and a draw places nobody — but they
+-- are recorded, because having played a ranked match is a different question
+-- from having been placed by one.
+--
+-- This is the only function in the game that moves a ranked rating, which is
+-- why the global index is told here rather than at any of the call sites: there
+-- is then no way to change a rating without the index hearing about it.
 function StatsService.applyElo(winner: Player, loser: Player, scoreW: number?): (any?, any?)
 	local w, l = profiles[winner.UserId], profiles[loser.UserId]
 	if not w or not l then return nil, nil end
@@ -79,11 +96,41 @@ function StatsService.applyElo(winner: Player, loser: Player, scoreW: number?): 
 	if (scoreW or 1) >= 1 then
 		w.rankedWins += 1
 		l.rankedLosses += 1
+	else
+		w.rankedDraws += 1
+		l.rankedDraws += 1
 	end
 	dirty[winner.UserId] = true
 	dirty[loser.UserId] = true
+	-- Queued, not written: this runs while both players are waiting for a
+	-- result, and the index is never worth a round trip in front of that.
+	global:publish(winner.UserId, w.rating)
+	global:publish(loser.UserId, l.rating)
 	return { before = beforeW, after = w.rating, delta = w.rating - beforeW },
 		{ before = beforeL, after = l.rating, delta = l.rating - beforeL }
+end
+
+-- Tests inject a fake index; production uses the one built above.
+function StatsService.setGlobalRank(rank: any)
+	global = rank
+end
+
+function StatsService.globalRank(): any
+	return global
+end
+
+-- Small enough to sit on a Debug attribute, which is all a live server can show
+-- the command bar.
+function StatsService.globalStatus(now: number): any
+	local rows = global:top()
+	return {
+		status = global.status,
+		rows = rows and #rows or 0,
+		age = math.floor(global:age(now)),
+		lastError = global.lastError,
+		reads = global.reads,
+		writes = global.writes,
+	}
 end
 
 do
@@ -132,6 +179,17 @@ function StatsService.load(player: Player)
 	if player.Parent then
 		Remotes.Profile:FireClient(player, profiles[id])
 	end
+
+	-- Migration, and self-healing, in one line.
+	--
+	-- Accounts with ranked history predate the index and have no key in it;
+	-- accounts whose rating moved on another server leave the key stale. Both
+	-- are fixed by republishing what the canonical profile says, every join.
+	-- The queue collapses duplicates, so this is at most one write per join,
+	-- and only for accounts that have actually played ranked.
+	if GlobalRank.eligible(profiles[id]) then
+		global:publish(id, profiles[id].rating)
+	end
 end
 
 function StatsService.get(player: Player): any
@@ -148,7 +206,7 @@ function StatsService.save(player: Player)
 			local merged = merge(old)
 			-- Counters accumulate across servers; settings are last-write-wins.
 			for _, k in ipairs({ "wins", "losses", "lines", "quads", "matches",
-				"rankedWins", "rankedLosses" }) do
+				"rankedWins", "rankedLosses", "rankedDraws" }) do
 				merged[k] = math.max(merged[k], profile[k])
 			end
 			merged.bestStreak = math.max(merged.bestStreak, profile.bestStreak)
@@ -230,6 +288,17 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 				winner.elo, loser.elo = StatsService.applyElo(winner.player, loser.player, 1)
 			end
 		end
+		-- The board this server is showing can be corrected from what it
+		-- already knows, so a player who just took the top spot does not have
+		-- to watch themselves sit at number four until the next fetch. The
+		-- fetch is asked for too, and throttled, so a busy server settling ten
+		-- ranked matches a minute still reads the index once.
+		for _, side in ipairs({ match.a, match.b }) do
+			if side.elo and side.player then
+				global:patch(side.player.UserId, side.elo.after, side.player.DisplayName)
+			end
+		end
+		global:request()
 	end
 
 	-- Push the updated profile so the rating on screen is the new one, not the
@@ -303,8 +372,48 @@ local function rebuildPanel(part: BasePart, title: string, accent: Color3, rows:
 	end
 end
 
--- Server-local rankings. A global leaderboard needs OrderedDataStores and a
--- moderation story for names; this is honest about being the current lobby.
+-- The top rows the WORLD RANK panel should show, and the title to show them
+-- under.
+--
+-- Reads the cache only. refreshLeaderboard runs on every join, every departure
+-- and every match result, and turning each of those into a GetSortedAsync would
+-- burn the server's request budget on redrawing a sign nobody is looking at.
+-- The fetch happens on its own clock; this renders whatever it last brought
+-- back.
+--
+-- With no good page the panel falls back to this server and says so. Showing
+-- the players in one lobby under the words WORLD RANK would be the kind of
+-- wrong that nobody ever catches, because it looks exactly like the truth.
+local function worldPanel(localRanked: { any }): (string, { any })
+	local rows = global:top()
+	local out = {}
+	-- An empty global page is truthful but dead: until the first ranked match
+	-- anywhere, the tower would show five dashes to a lobby full of people.
+	-- Falling back to this server is more use and stays honest, because the
+	-- title falls back with it.
+	if rows and #rows > 0 then
+		for i = 1, GlobalRank.LIMIT do
+			local e = rows[i]
+			table.insert(out, { i, e and e.name or "—", e and e.rating or "—" })
+		end
+		return "WORLD RANK", out
+	end
+	for i = 1, GlobalRank.LIMIT do
+		local e = localRanked[i]
+		table.insert(out, { i, e and e.name or "—", e and e.p.rating or "—" })
+	end
+	return "SERVER RANK", out
+end
+
+-- Which title the panel would carry right now. Exposed so the fallback can be
+-- tested without a lobby to render into: the title is the honesty guarantee.
+function StatsService.worldPanelForTest(): (string, { any })
+	return worldPanel({})
+end
+
+-- The auxiliary panels stay server-local by design; only their titles had to
+-- change, because next to a global WORLD RANK an unqualified TOP SCORES reads
+-- as global too.
 function StatsService.refreshLeaderboard()
 	local lobby = workspace:FindFirstChild("Lobby")
 	local tower = lobby and lobby:FindFirstChild("Leaderboard")
@@ -318,13 +427,8 @@ function StatsService.refreshLeaderboard()
 		end
 	end
 
-	-- Ranked by rating now that ranked play means something.
 	table.sort(ranked, function(a, b) return a.p.rating > b.p.rating end)
-	local world = {}
-	for i = 1, 5 do
-		local e = ranked[i]
-		table.insert(world, { i, e and e.name or "—", e and e.p.rating or "—" })
-	end
+	local worldTitle, world = worldPanel(ranked)
 
 	table.sort(ranked, function(a, b) return a.p.streak > b.p.streak end)
 	local streak = {}
@@ -353,14 +457,37 @@ function StatsService.refreshLeaderboard()
 		if part:IsA("BasePart") and part.Name:match("^Panel_") then
 			local which = part.Name:sub(7)
 			if which == "WORLD RANK" then
-				rebuildPanel(part, "WORLD RANK", Theme.C.gold, world)
+				rebuildPanel(part, worldTitle, Theme.C.gold, world)
 			elseif which == "WIN STREAK" then
-				rebuildPanel(part, "WIN STREAK", Color3.fromRGB(255, 154, 43), streak)
+				rebuildPanel(part, "WIN STREAK  ·  SERVER", Color3.fromRGB(255, 154, 43), streak)
 			elseif which == "TOP SCORES" then
-				rebuildPanel(part, "TOP SCORES", Theme.C.violet, scores)
+				rebuildPanel(part, "TOP SCORES  ·  SERVER", Theme.C.violet, scores)
 			end
 		end
 	end
+end
+
+-- The one task that talks to the ranking index.
+--
+-- Everything else queues a write or asks for a fetch and returns immediately,
+-- so no gameplay path can ever be waiting on a DataStore. A read failure keeps
+-- the last good page; a write failure drops that write and lets the next ranked
+-- result or join republish it. Neither can reach a match.
+function StatsService.startGlobalRank()
+	task.spawn(function()
+		if global:refresh(os.clock()) then
+			StatsService.refreshLeaderboard()
+		end
+		while true do
+			task.wait(5)
+			global:flush()
+			if global:shouldFetch(os.clock()) then
+				if global:refresh(os.clock()) then
+					StatsService.refreshLeaderboard()
+				end
+			end
+		end
+	end)
 end
 
 -- Periodic flush so a server crash costs at most a minute of progress.
