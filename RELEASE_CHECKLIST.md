@@ -55,6 +55,8 @@ skipped, so they are called out.
 - [ ] WORLD RANK reads the global board, falls back to SERVER RANK honestly
 - [ ] Skins: ownership and equipped skin persist
 - [ ] Secret puzzle completion persists and cannot be undone
+- [ ] Titles: ownership persists, equipped persists, retroactive unlocks fire once
+- [ ] QUAD MACHINE grants GOLDEN T and ELITE grants DIAMOND I, once each
 - [ ] Sprint best (lower is better) and Blitz best (higher is better) persist
 
 ## Security

@@ -20,6 +20,7 @@ local Theme = require(Shared.Theme)
 local Enums = require(Shared.Enums)
 local Remotes = require(Shared.Remotes)
 local SkinData = require(Shared.SkinData)
+local TitleData = require(Shared.TitleData)
 local BlitzScoring = require(Shared.BlitzScoring)
 local GlobalRank = require(script.Parent.GlobalRank)
 
@@ -60,6 +61,11 @@ local DEFAULT = {
 	-- Blitz is a score attack, so higher is better — the opposite of bestSprint
 	-- above, which is a time.
 	bestBlitz = 0,
+	-- Titles, same shape as skins and for the same reasons: ids only, rebuilt
+	-- per profile below, and a default that is always owned so there is never
+	-- an untitled state to render.
+	ownedTitles = {},
+	equippedTitle = TitleData.DEFAULT_ID,
 }
 
 -- Elo. The RANKED pad was queuing exactly like quick play, which made the label
@@ -225,7 +231,44 @@ local function unionProgress(merged: any, profile: any): any
 	-- sprint record, which is a time. Max for the same reason ownership unions
 	-- and completion ORs: a stale server must not take a record away.
 	merged.bestBlitz = math.max(tonumber(merged.bestBlitz) or 0, tonumber(profile.bestBlitz) or 0)
+
+	-- Titles union like skins. An achievement is a thing that happened, and a
+	-- stale server saving late does not get to say it did not.
+	local titles = type(merged.ownedTitles) == "table" and merged.ownedTitles or {}
+	if type(profile.ownedTitles) == "table" then
+		for id, value in pairs(profile.ownedTitles) do
+			if value == true then titles[id] = true end
+		end
+	end
+	titles[TitleData.DEFAULT_ID] = true
+	merged.ownedTitles = titles
+	merged.equippedTitle = titles[profile.equippedTitle] and profile.equippedTitle
+		or TitleData.DEFAULT_ID
 	return merged
+end
+
+-- Titles, rebuilt from what was saved rather than adopted from it. Exactly the
+-- rules skins get: the default is owned, the equipped one is owned, ids that
+-- have left the catalog stop being presented without being erased from the
+-- store, and the table belongs to this profile rather than to DEFAULT.
+local function mergeTitles(p: any, saved: any?)
+	local owned = {}
+	if type(saved) == "table" and type(saved.ownedTitles) == "table" then
+		for id, value in pairs(saved.ownedTitles) do
+			if value == true and TitleData.exists(id) then
+				owned[id] = true
+			end
+		end
+	end
+	owned[TitleData.DEFAULT_ID] = true
+	p.ownedTitles = owned
+
+	local equipped = type(saved) == "table" and saved.equippedTitle or nil
+	if type(equipped) == "string" and owned[equipped] then
+		p.equippedTitle = equipped
+	else
+		p.equippedTitle = TitleData.DEFAULT_ID
+	end
 end
 
 local function merge(saved: any?): any
@@ -238,7 +281,16 @@ local function merge(saved: any?): any
 		end
 	end
 	mergeSkins(p, saved)
+	mergeTitles(p, saved)
 	return p
+end
+
+local function grantTitleCore(p: any, userId: number, titleId: any): string
+	if not TitleData.exists(titleId) then return "unknown title" end
+	if p.ownedTitles[titleId] then return "already" end
+	p.ownedTitles[titleId] = true
+	dirty[userId] = true
+	return "granted"
 end
 
 local function grantCore(p: any, userId: number, skinId: any): string
@@ -271,6 +323,18 @@ function StatsService.load(player: Player)
 	if profiles[id].secretPuzzleSolved then
 		grantCore(profiles[id], id, SkinData.SECRET_ID)
 	end
+	-- Accounts that earned these before titles existed get them on the next
+	-- login rather than being asked to do it all again. Batched into the single
+	-- push below, so a veteran unlocking six at once is still one message.
+	for _, title in ipairs(TitleData.ordered()) do
+		if TitleData.earned(title, profiles[id]) then
+			grantTitleCore(profiles[id], id, title.id)
+			if title.rewardSkin then
+				grantCore(profiles[id], id, title.rewardSkin)
+			end
+		end
+	end
+
 	if player.Parent then
 		Remotes.Profile:FireClient(player, profiles[id])
 	end
@@ -364,6 +428,17 @@ function StatsService.completeSecretPuzzle(player: Player): string
 	if p.secretPuzzleSolved then return "already solved" end
 	p.secretPuzzleSolved = true
 	grantCore(p, player.UserId, SkinData.SECRET_ID)
+	-- The title that comes with it, in the same transaction. Granting inline
+	-- rather than calling the evaluator keeps this to one push, which is what
+	-- stops a client seeing the puzzle solved but the title still missing.
+	for _, title in ipairs(TitleData.ordered()) do
+		if TitleData.earned(title, p) then
+			grantTitleCore(p, player.UserId, title.id)
+			if title.rewardSkin then
+				grantCore(p, player.UserId, title.rewardSkin)
+			end
+		end
+	end
 	dirty[player.UserId] = true
 	if player.Parent then
 		Remotes.Profile:FireClient(player, p)
@@ -379,6 +454,83 @@ end
 -- PuzzleService needs to know a profile is loaded before it reserves the nook.
 function StatsService.getProfile(player: Player): any?
 	return profiles[player.UserId]
+end
+
+-- Server-only, like grantSkin. No remote reaches it and none ever should.
+function StatsService.grantTitle(player: Player, titleId: any): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	local result = grantTitleCore(p, player.UserId, titleId)
+	if result == "granted" and player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return result
+end
+
+function StatsService.ownsTitle(player: Player, titleId: any): boolean
+	local p = profiles[player.UserId]
+	return (p and type(titleId) == "string" and p.ownedTitles[titleId] == true) or false
+end
+
+-- Works out everything this profile has earned and awards it in one go.
+--
+-- Event driven: called after the server commits a change that could possibly
+-- qualify somebody -- a match result, a Sprint or Blitz record, the secret
+-- solve, and a profile load so accounts that already did the work get their
+-- titles without repeating it. Nothing polls.
+--
+-- Batched on purpose. A veteran account logging in for the first time after
+-- this shipped may qualify for six titles at once, and six separate profile
+-- pushes would be six chances for a client to see a half-awarded profile.
+--
+-- A title with a linked skin grants that skin too, through the Phase 13 seam
+-- rather than by touching ownedSkins. Re-running is harmless: everything here
+-- is a set membership test, so an account that already owns both changes
+-- nothing, and one that somehow owns the title but lost the skin gets the skin
+-- back rather than being left in a state it could not have reached honestly.
+--
+-- Returns the titles newly granted, so a caller can say so.
+function StatsService.evaluateTitles(player: Player): { string }
+	local p = profiles[player.UserId]
+	if not p then return {} end
+	local granted, changed = {}, false
+	for _, title in ipairs(TitleData.ordered()) do
+		if TitleData.earned(title, p) then
+			if grantTitleCore(p, player.UserId, title.id) == "granted" then
+				table.insert(granted, title.id)
+				changed = true
+			end
+			if title.rewardSkin
+				and grantCore(p, player.UserId, title.rewardSkin) == "granted" then
+				changed = true
+			end
+		end
+	end
+	if changed and player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return granted
+end
+
+-- The client asks; this decides. Same shape as equipSkin.
+--
+-- Returns "equipped", "no change", "not owned", "unknown title", "no profile"
+-- or "busy".
+function StatsService.equipTitle(player: Player, titleId: any, busy: boolean?): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	if not TitleData.exists(titleId) then return "unknown title" end
+	if not p.ownedTitles[titleId] then return "not owned" end
+	-- Who somebody is presenting as should hold still for the length of a match
+	-- or a run, the same way an equipped skin does.
+	if busy then return "busy" end
+	if p.equippedTitle == titleId then return "no change" end
+	p.equippedTitle = titleId
+	dirty[player.UserId] = true
+	if player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return "equipped"
 end
 
 -- The two seams the suite needs: what a stored profile becomes on load, and
@@ -500,6 +652,26 @@ function StatsService.recordMatch(match: any, loser: any?, reason: string?)
 		end
 	end
 
+	-- What each side is presenting as, for the result card. Read after the
+	-- counters settle and before the evaluator runs, so the card shows the
+	-- title the player chose rather than one this match happened to unlock --
+	-- nothing is ever auto-equipped.
+	for _, side in ipairs({ match.a, match.b }) do
+		local p = side.player and profiles[side.player.UserId]
+		if p then
+			local title = TitleData.get(p.equippedTitle)
+			side.title = title and title.name or nil
+		end
+	end
+
+	-- After every counter above has been committed, never before: the evaluator
+	-- reads the profile and does not touch it.
+	for _, side in ipairs({ match.a, match.b }) do
+		if side.player and profiles[side.player.UserId] then
+			StatsService.evaluateTitles(side.player)
+		end
+	end
+
 	StatsService.refreshLeaderboard()
 end
 
@@ -526,6 +698,7 @@ function StatsService.recordBlitz(player: Player, result: any): string
 		p.bestBlitz = score
 		verdict = "record"
 	end
+	StatsService.evaluateTitles(player)
 	if player.Parent then
 		Remotes.Profile:FireClient(player, p)
 	end
@@ -543,6 +716,7 @@ function StatsService.recordPractice(player: Player, record: any)
 		p.bestSprint = (p.bestSprint > 0) and math.min(p.bestSprint, record.time) or record.time
 	end
 	dirty[player.UserId] = true
+	StatsService.evaluateTitles(player)
 end
 
 -- ── Leaderboard tower ─────────────────────────────────────────────────────

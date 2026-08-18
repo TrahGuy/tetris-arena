@@ -16,6 +16,7 @@ local Theme = require(Shared.Theme)
 local Tuning = require(Shared.Tuning)
 local Enums = require(Shared.Enums)
 local BlitzScoring = require(Shared.BlitzScoring)
+local TitleData = require(Shared.TitleData)
 
 local LobbyUi = {}
 LobbyUi.__index = LobbyUi
@@ -76,11 +77,12 @@ function LobbyUi.new(parent: Instance, hooks: any)
 	bar.BackgroundTransparency = 1
 	bar.AnchorPoint = Vector2.new(1, 1)
 	bar.Position = UDim2.new(1, -18, 1, -18)
-	bar.Size = UDim2.fromOffset(150, 92)
+	bar.Size = UDim2.fromOffset(150, 138)
 	bar.Parent = chrome
 	Theme.list(bar, 8)
 	local help = Theme.button(bar, "HOW TO PLAY", nil, { Size = UDim2.fromOffset(150, 38), LayoutOrder = 1 })
 	local settingsBtn = Theme.button(bar, "SETTINGS", nil, { Size = UDim2.fromOffset(150, 38), LayoutOrder = 2 })
+	local titlesBtn = Theme.button(bar, "TITLES", nil, { Size = UDim2.fromOffset(150, 38), LayoutOrder = 3 })
 	self.bar = bar
 
 	-- Pad prompt. Appears when the player is standing on a station.
@@ -318,6 +320,69 @@ function LobbyUi.new(parent: Instance, hooks: any)
 		s.hit.InputEnded:Connect(function() dragging = false end)
 	end
 
+	-- ── Titles ────────────────────────────────────────────────────────────
+	local titles = screen(parent, "Titles")
+	local tc = card(titles, 520, 470)
+	Theme.label(tc, "TITLES", {
+		Font = Theme.F.display, TextSize = 30, TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.fromOffset(468, 40),
+	})
+	Theme.label(tc, "Cosmetic only. Nothing here changes how the game plays.", {
+		TextColor3 = Theme.C.muted, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+		Position = UDim2.fromOffset(0, 34), Size = UDim2.fromOffset(468, 18),
+	})
+	local list = Instance.new("ScrollingFrame")
+	list.BackgroundTransparency = 1
+	list.BorderSizePixel = 0
+	list.Position = UDim2.fromOffset(0, 60)
+	list.Size = UDim2.fromOffset(468, 340)
+	list.CanvasSize = UDim2.new()
+	list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	list.ScrollBarThickness = 4
+	list.Parent = tc
+	Theme.list(list, 6)
+	local titleClose = Theme.button(tc, "CLOSE", nil, {
+		Position = UDim2.fromOffset(0, 408), Size = UDim2.fromOffset(468, 42),
+	})
+	self.titles = titles
+	self.titleRows = {}
+
+	-- One row per catalog entry, built once. Repopulating rewrites text and
+	-- colour rather than rebuilding instances, so opening this panel does not
+	-- churn the GUI.
+	for i, title in ipairs(TitleData.ordered()) do
+		local row = Theme.panel(list, {
+			BackgroundTransparency = 0.4,
+			Size = UDim2.new(1, 0, 0, 52),
+			LayoutOrder = i,
+		})
+		local name = Theme.label(row, title.name, {
+			Font = Theme.F.display, TextSize = 17, TextXAlignment = Enum.TextXAlignment.Left,
+			Position = UDim2.fromOffset(14, 6), Size = UDim2.fromOffset(250, 20),
+		})
+		local sub = Theme.label(row, title.description, {
+			TextColor3 = Theme.C.muted, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+			Position = UDim2.fromOffset(14, 27), Size = UDim2.fromOffset(300, 16),
+		})
+		local state = Theme.button(row, "", nil, {
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -12, 0.5, 0), Size = UDim2.fromOffset(120, 32),
+		})
+		state.Activated:Connect(function()
+			if self.hooks.onEquipTitle then self.hooks.onEquipTitle(title.id) end
+		end)
+		self.titleRows[title.id] = { row = row, name = name, sub = sub, state = state, def = title }
+	end
+
+	titlesBtn.Activated:Connect(function()
+		titles.Visible = true
+		self:_select(titleClose)
+	end)
+	titleClose.Activated:Connect(function()
+		titles.Visible = false
+		self:_select(nil)
+	end)
+
 	self:_refreshSliders()
 
 	-- A player who puts the mouse down and picks up a pad mid-screen should get
@@ -356,9 +421,58 @@ function LobbyUi:applyProfile(profile: any)
 	self:_refreshSliders()
 end
 
+local RARITY_COLOUR = {
+	COMMON = Theme.C.muted,
+	RARE = Theme.C.cy,
+	EPIC = Theme.C.violet,
+	LEGENDARY = Theme.C.gold,
+	SECRET = Theme.C.mg,
+}
+
+-- Redraws the panel from the profile the server last sent. Ownership is read,
+-- never decided: a locked row shows progress the server already reported.
+function LobbyUi:applyTitles(owned: any, equipped: string?, profile: any)
+	self.equippedTitle = equipped
+	-- The header is built from this, and applyProfile has usually already run
+	-- for this push -- so without redrawing it here it shows the title from the
+	-- push before, which looks exactly like an equip that did not take.
+	self:setPlayerCount(self.playerCount or 1)
+	for id, row in pairs(self.titleRows) do
+		local isOwned = type(owned) == "table" and owned[id] == true
+		local colour = RARITY_COLOUR[row.def.rarity] or Theme.C.text
+		row.name.Text = row.def.name
+		row.name.TextColor3 = isOwned and colour or Theme.C.dim
+		row.row.BackgroundTransparency = isOwned and 0.25 or 0.55
+
+		if id == equipped then
+			row.state.Text = "EQUIPPED"
+			row.state.BackgroundColor3 = colour
+			row.state.TextColor3 = Theme.C.bg
+			row.sub.Text = row.def.description
+		elseif isOwned then
+			row.state.Text = "EQUIP"
+			row.state.BackgroundColor3 = Theme.C.panelHi
+			row.state.TextColor3 = Theme.C.text
+			row.sub.Text = row.def.description
+		else
+			row.state.Text = "LOCKED"
+			row.state.BackgroundColor3 = Theme.C.panelHi
+			row.state.TextColor3 = Theme.C.dim
+			-- Progress where a number helps. The secret one deliberately gets
+			-- none: a counter would give away that there is something to count.
+			local progress = profile and TitleData.progress(row.def, profile)
+			row.sub.Text = progress and (row.def.description .. "   ·   " .. progress)
+				or row.def.description
+		end
+	end
+end
+
 function LobbyUi:setPlayerCount(n: number)
 	self.playerCount = n
-	self.countLabel.Text = string.format("%d IN LOBBY  ·  %s%s", n, Players.LocalPlayer.DisplayName,
+	local title = self.equippedTitle and TitleData.get(self.equippedTitle)
+	self.countLabel.Text = string.format("%d IN LOBBY  ·  %s%s%s", n,
+		Players.LocalPlayer.DisplayName,
+		title and ("  ·  " .. title.name) or "",
 		self.rating and string.format("  ·  %d ELO", self.rating) or "")
 end
 
@@ -485,6 +599,9 @@ function LobbyUi:showResults(payload: any, canRematch: boolean)
 	end
 	-- Ranked only. A rating that moved without being shown is a rating players
 	-- assume is broken, and the disconnect case is exactly where they look.
+	if payload.title then
+		self.resultSub.Text = ("%s   ·   %s"):format(self.resultSub.Text, payload.title)
+	end
 	if payload.elo then
 		self.resultSub.Text = ("%s   ·   %d ELO (%+d)"):format(
 			self.resultSub.Text, payload.elo.after, payload.elo.delta)

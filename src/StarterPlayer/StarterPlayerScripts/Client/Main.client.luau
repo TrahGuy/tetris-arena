@@ -14,6 +14,7 @@ local Bag = require(Shared.Bag)
 local Net = require(Shared.Net)
 local Remotes = require(Shared.Remotes)
 local SkinData = require(Shared.SkinData)
+local TitleData = require(Shared.TitleData)
 
 local Sim = require(script.Parent.Sim)
 local Hud = require(script.Parent.Hud)
@@ -69,10 +70,13 @@ local ownedSkins, equippedSkin = { [SkinData.DEFAULT_ID] = true }, SkinData.DEFA
 -- nil until the first profile arrives, so a player who solved the nook in an
 -- earlier session is not congratulated again the moment they log in.
 local secretSolved = nil
+local seenProfile = false
 -- Everything about a Blitz run that the client is allowed to know: the deadline
 -- the server set, and the score the server last told us. Neither is computed
 -- here.
 local blitz = nil
+-- Display state. The server owns both; this is the last thing it said.
+local ownedTitles, equippedTitle = { [TitleData.DEFAULT_ID] = true }, TitleData.DEFAULT_ID
 local bestBlitz = 0
 
 local hud = Hud.new(gui, {})
@@ -266,6 +270,11 @@ ui = LobbyUi.new(gui, {
 	end,
 	onSaveSettings = function(s)
 		Remotes.SaveSettings:FireServer(s)
+	end,
+	onEquipTitle = function(titleId)
+		-- A request. The server checks ownership and whether we are mid-match.
+		Remotes.EquipTitle:FireServer({ titleId = titleId })
+		SoundKit.play("uiPress")
 	end,
 })
 
@@ -518,6 +527,37 @@ Remotes.Profile.OnClientEvent:Connect(function(profile)
 	if type(profile.bestBlitz) == "number" then
 		bestBlitz = profile.bestBlitz
 	end
+
+	-- Titles arrive with the profile like every other entitlement. A newly
+	-- granted one is never equipped automatically: owning and choosing are
+	-- different, and a player may well prefer SECRET SOLVER to ELITE.
+	local before = ownedTitles
+	if type(profile.ownedTitles) == "table" then
+		ownedTitles = profile.ownedTitles
+	end
+	if type(profile.equippedTitle) == "string" then
+		equippedTitle = profile.equippedTitle
+	end
+	ui:applyTitles(ownedTitles, equippedTitle, profile)
+
+	-- Say so when something is earned mid-session. Historical unlocks arrive in
+	-- the very first push, when `before` is still the bare default, and those
+	-- are summarised rather than announced one at a time.
+	if seenProfile then
+		local fresh = {}
+		for id in pairs(ownedTitles) do
+			if not before[id] then table.insert(fresh, id) end
+		end
+		if #fresh == 1 then
+			local t = TitleData.get(fresh[1])
+			ui:toast("TITLE UNLOCKED", t and t.name or fresh[1], Theme.C.gold)
+			SoundKit.play("go", 0.9)
+		elseif #fresh > 1 then
+			ui:toast("TITLES UNLOCKED", ("%d new titles"):format(#fresh), Theme.C.gold)
+			SoundKit.play("go", 0.9)
+		end
+	end
+	seenProfile = true
 	if type(profile.equippedSkin) == "string" then
 		equippedSkin = profile.equippedSkin
 		hud:setSkin(equippedSkin)

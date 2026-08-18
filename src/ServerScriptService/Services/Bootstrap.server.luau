@@ -139,6 +139,18 @@ end)
 -- to a sprint record and a lines total that both show on the leaderboard.
 -- PracticeService issues the session and vets what comes back against the wall
 -- clock it measured.
+-- Equipping a title. Ownership is never read from the message; Stats decides,
+-- and refuses while the player is mid-match or mid-run so identity holds still
+-- for the length of one.
+Remotes.EquipTitle.OnServerEvent:Connect(function(player, msg)
+	if not limits.ui:allow(player) then return end
+	if type(msg) ~= "table" then return end
+	local busy = Matchmaking.matchFor(player) ~= nil
+		or Matchmaking.isQueued(player)
+		or Practice.sessionFor(player) ~= nil
+	Stats.equipTitle(player, msg.titleId, busy)
+end)
+
 Remotes.Practice.OnServerEvent:Connect(function(player, msg)
 	if not limits.ui:allow(player) then return end
 	if type(msg) ~= "table" then return end
@@ -291,6 +303,22 @@ if RunService:IsStudio() then
 		end
 		debugFolder:SetAttribute("GrantSkinResult",
 			("%s %s -> %s"):format(player.Name, tostring(skinId), Stats.grantSkin(player, skinId)))
+	end)
+
+	-- The same door for titles:
+	--   game.ServerStorage.Debug:SetAttribute("GrantTitle", "12345678:elite")
+	debugFolder:GetAttributeChangedSignal("GrantTitle"):Connect(function()
+		local request = debugFolder:GetAttribute("GrantTitle")
+		if type(request) ~= "string" or request == "" then return end
+		local idText, titleId = request:match("^(-?%d+):(.+)$")
+		local userId = tonumber(idText)
+		local player = userId and Players:GetPlayerByUserId(userId)
+		if not player then
+			debugFolder:SetAttribute("GrantTitleResult", "no such player: " .. request)
+			return
+		end
+		debugFolder:SetAttribute("GrantTitleResult",
+			("%s %s -> %s"):format(player.Name, tostring(titleId), Stats.grantTitle(player, titleId)))
 	end)
 end
 

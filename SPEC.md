@@ -108,6 +108,16 @@ Gamepad: any modal screen sets `GuiService.SelectedObject` on open and clears it
 Every client-to-server remote requires a table and validates its own fields; a non-table is a no-op, never a default.
 Blitz: quitting sends `{ sessionId, abandon = true }`. Abandoned runs never set a record.
 
+## Titles
+
+Catalog: `Shared/TitleData.luau`. Stable ids; profiles store `ownedTitles` (set of ids) and `equippedTitle` only.
+Default `rookie` is always owned; an invalid, retired or unowned equipped title falls back to it.
+Ownership unions on save and is never revoked. Equipped is a preference, last write wins.
+Requirements read authoritative profile fields only. ELITE uses `peakRating`; SECRET SOLVER uses `secretPuzzleSolved`, never `ownedSkins.galaxy`.
+Linked rewards: QUAD MACHINE grants `golden`, ELITE grants `diamond`, through `StatsService`'s skin grant seam. Idempotent and self-healing.
+Evaluation is event-driven (load, match result, Sprint record, Blitz record, secret solve) and batched into one profile push. Titles are never auto-equipped.
+No remote grants a title or completes an achievement; `EquipTitle` is a request the server validates. Titles never enter a gameplay packet.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

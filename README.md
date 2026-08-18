@@ -36,6 +36,7 @@ open at that path). Move it in here when convenient.
 | 14 — Secret puzzle and reward | done |
 | 15 — Blitz mode | done |
 | 16 — Release hardening | done — see [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) |
+| 17 — Player titles and achievements | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -62,7 +63,6 @@ description — so swap any that sound wrong. One line each.
 | --- | --- |
 | No global Blitz board | The best score is saved per account and the tower shows the best in this server. A world ranking would need a second OrderedDataStore; ranked Elo has one, Blitz does not. |
 | A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
-| Only one skin can be earned | The secret nook pays out GALAXY CUBE. GOLDEN T and DIAMOND I still have no source; they wait on the same server-only grant an achievement or a purchase would use. No monetisation is implemented. |
 | WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
 | Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
 | Never tested with two live clients | Studio over MCP drives one client, and Studio's two-player local server is a Test-tab action with no scriptable entry point. Everything one client can reach has been exercised against a real server datamodel over real RemoteEvents — including a full bot match, garbage, KO, results and rematch. The two-sided logic is covered headlessly by `Tests.twoPlayer`. What remains genuinely untested is two real LocalScripts against each other: human-versus-human pairing in Quick, Ranked and Private, and a ranked disconnect driven by a real `PlayerRemoving`. [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) marks exactly those boxes. |

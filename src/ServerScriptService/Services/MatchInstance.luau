@@ -450,7 +450,10 @@ function MatchInstance:_finish(loser: any?, _winOutcome: string, reason: string?
 				reason = reason,
 				stats = statsOf(side),
 				opponent = side.other.name,
-				-- Set by recordMatch, and only in ranked.
+				-- Both set by recordMatch. The title is presentation carried on
+				-- the result message only; nothing about it reaches the
+				-- simulation, and no other match packet mentions it.
+				title = side.title,
 				elo = side.elo,
 				rating = side.elo and side.elo.after or nil,
 				-- Nothing to rematch against if the other side walked out.

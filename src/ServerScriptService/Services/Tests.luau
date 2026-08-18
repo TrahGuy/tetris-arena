@@ -21,7 +21,8 @@
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
-	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring, LockValidation
+	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring, LockValidation,
+	TitleData
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -2137,6 +2138,7 @@ function T.remoteCatalog()
 		QueueRequest = true, QueueCancel = true, MatchUpdate = true, Lock = true,
 		Garbage = true, Result = true, Resync = true, Forfeit = true,
 		Practice = true, Profile = true, SaveSettings = true, EquipSkin = true,
+		EquipTitle = true,
 		Snapshot = true,
 	}
 	local found = {}
@@ -2299,6 +2301,307 @@ function T.sharedValidator()
 	eq("validator: and says so", reason, "piece is not the one in play")
 end
 
+-- == Titles (Phase 17) ====================================================
+
+function T.titleCatalog()
+	local ok, problems = TitleData.validate()
+	check("titles: the catalog validates", ok, table.concat(problems, "; "))
+
+	local seenId, seenOrder = {}, {}
+	for _, t in ipairs(TitleData.ordered()) do
+		check("titles: " .. t.id .. " has a unique id", not seenId[t.id])
+		seenId[t.id] = true
+		check("titles: " .. t.id .. " has a unique sort order", not seenOrder[t.sortOrder])
+		seenOrder[t.sortOrder] = true
+		check("titles: " .. t.id .. " has a known rarity", TitleData.RARITY[t.rarity] ~= nil)
+		if t.rewardSkin then
+			check("titles: " .. t.id .. " rewards a real skin", SkinData.exists(t.rewardSkin))
+		end
+	end
+
+	eq("titles: the default is rookie", TitleData.DEFAULT_ID, "rookie")
+	check("titles: the default is owned by default", TitleData.default().defaultOwned == true)
+	check("titles: an unknown id does not exist", not TitleData.exists("no_such_title"))
+	check("titles: nor a non-string", not TitleData.exists(7))
+	eq("titles: an unknown id resolves to the default", TitleData.resolve("nope").id, "rookie")
+
+	-- The two skins that had no unlock source before this phase now have one.
+	local rewards = {}
+	for _, t in ipairs(TitleData.ordered()) do
+		if t.rewardSkin then rewards[t.rewardSkin] = t.id end
+	end
+	eq("titles: GOLDEN T is earned by QUAD MACHINE", rewards.golden, "quad_machine")
+	eq("titles: DIAMOND I is earned by ELITE", rewards.diamond, "elite")
+
+	-- The secret one gives nothing away.
+	local secret = TitleData.get("secret_solver")
+	check("titles: the secret title does not describe the puzzle",
+		not secret.description:lower():find("puzzle")
+		and not secret.description:lower():find("nook")
+		and not secret.description:lower():find("corner"))
+	check("titles: and shows no progress counter",
+		TitleData.progress(secret, { secretPuzzleSolved = false }) == nil)
+end
+
+function T.titleRequirements()
+	local function earns(id, profile)
+		return TitleData.earned(TitleData.get(id), profile)
+	end
+
+	check("titles: everyone has ROOKIE", earns("rookie", {}))
+	check("titles: one win earns FIRST WIN", earns("first_blood", { wins = 1 }))
+	check("titles: no wins does not", not earns("first_blood", { wins = 0 }))
+	check("titles: ten ranked wins earn CONTENDER", earns("contender", { rankedWins = 10 }))
+	check("titles: nine do not", not earns("contender", { rankedWins = 9 }))
+	check("titles: a five streak earns HOT STREAK", earns("streaker", { bestStreak = 5 }))
+	check("titles: four does not", not earns("streaker", { bestStreak = 4 }))
+	check("titles: a hundred quads earn QUAD MACHINE", earns("quad_machine", { quads = 100 }))
+	check("titles: ninety-nine do not", not earns("quad_machine", { quads = 99 }))
+	check("titles: a hundred matches earn BLOCK VETERAN", earns("veteran", { matches = 100 }))
+	check("titles: ninety-nine do not", not earns("veteran", { matches = 99 }))
+
+	-- ELITE reads the peak, so it survives losing form.
+	check("titles: peak 1500 earns ELITE", earns("elite", { peakRating = 1500 }))
+	check("titles: peak 1499 does not", not earns("elite", { peakRating = 1499 }))
+	check("titles: a peak of 1500 still earns it after the rating falls",
+		earns("elite", { peakRating = 1500, rating = 1100 }))
+	check("titles: a current rating of 1500 with a lower peak does not",
+		not earns("elite", { rating = 1500, peakRating = 1200 }))
+
+	-- Sprint is a time: lower is better, and zero means never finished.
+	check("titles: a 60s sprint earns SPEED DEMON", earns("sprinter", { bestSprint = 60 }))
+	check("titles: a 45s sprint earns it", earns("sprinter", { bestSprint = 45 }))
+	check("titles: a 61s sprint does not", not earns("sprinter", { bestSprint = 61 }))
+	check("titles: never having run one does not", not earns("sprinter", { bestSprint = 0 }))
+
+	check("titles: 25000 earns BLITZ MASTER", earns("blitz_master", { bestBlitz = 25000 }))
+	check("titles: 24999 does not", not earns("blitz_master", { bestBlitz = 24999 }))
+
+	-- The secret title reads the completion flag, not what it paid out.
+	check("titles: solving earns SECRET SOLVER", earns("secret_solver", { secretPuzzleSolved = true }))
+	check("titles: not solving does not", not earns("secret_solver", { secretPuzzleSolved = false }))
+	check("titles: owning GALAXY CUBE alone does not earn it",
+		not earns("secret_solver", { ownedSkins = { galaxy = true }, secretPuzzleSolved = false }))
+
+	-- Progress copy, where it exists.
+	eq("titles: quad progress reads as a fraction",
+		TitleData.progress(TitleData.get("quad_machine"), { quads = 72 }), "72 / 100")
+	eq("titles: sprint progress reads as a time",
+		TitleData.progress(TitleData.get("sprinter"), { bestSprint = 72.41 }), "72.41s / 60s")
+	check("titles: an unrun sprint shows no time",
+		TitleData.progress(TitleData.get("sprinter"), { bestSprint = 0 }) == "-- / 60s")
+end
+
+function T.titleProfile()
+	local a = fakePlayer(-601, "TitleOne")
+	Stats.load(a)
+	local p = Stats.get(a)
+	eq("title profile: a new profile equips ROOKIE", p.equippedTitle, "rookie")
+	check("title profile: and owns it", p.ownedTitles.rookie == true)
+
+	local b = fakePlayer(-602, "TitleTwo")
+	Stats.load(b)
+	check("title profile: two profiles do not share a title table",
+		Stats.get(a).ownedTitles ~= Stats.get(b).ownedTitles)
+	eq("title profile: granting one is granted", Stats.grantTitle(a, "veteran"), "granted")
+	check("title profile: and does not reach the other", Stats.get(b).ownedTitles.veteran == nil)
+	eq("title profile: granting again is idempotent", Stats.grantTitle(a, "veteran"), "already")
+	eq("title profile: an unknown title cannot be granted", Stats.grantTitle(a, "nope"), "unknown title")
+	eq("title profile: nor a malformed id", Stats.grantTitle(a, {}), "unknown title")
+	check("title profile: the title is owned", Stats.ownsTitle(a, "veteran"))
+
+	-- Equipping.
+	eq("title profile: an owned title equips", Stats.equipTitle(a, "veteran"), "equipped")
+	eq("title profile: and is recorded", Stats.get(a).equippedTitle, "veteran")
+	eq("title profile: equipping it again changes nothing", Stats.equipTitle(a, "veteran"), "no change")
+	eq("title profile: an unowned title is refused", Stats.equipTitle(a, "elite"), "not owned")
+	eq("title profile: which leaves the equipped one alone", Stats.get(a).equippedTitle, "veteran")
+	eq("title profile: an unknown title is refused", Stats.equipTitle(a, "nope"), "unknown title")
+	eq("title profile: equipping while busy is refused", Stats.equipTitle(a, "rookie", true), "busy")
+	eq("title profile: still unchanged", Stats.get(a).equippedTitle, "veteran")
+
+	-- Malformed requests do nothing at all.
+	local held = Stats.get(a).equippedTitle
+	for _, bad in ipairs({ 123, true, "", string.rep("t", 20000), {} }) do
+		local okCall, verdict = pcall(Stats.equipTitle, a, bad)
+		check("title profile: a malformed equip does not error", okCall, tostring(verdict))
+		check("title profile: and equips nothing", verdict ~= "equipped")
+	end
+	check("title profile: a nil equip does not error", (pcall(Stats.equipTitle, a, nil)))
+	eq("title profile: nothing moved", Stats.get(a).equippedTitle, held)
+
+	-- The client's one write path cannot touch any of it.
+	Stats.applySettings(a, { ownedTitles = { elite = true }, equippedTitle = "elite", das = 125 })
+	check("title profile: SaveSettings cannot grant a title", Stats.get(a).ownedTitles.elite == nil)
+	eq("title profile: nor equip one", Stats.get(a).equippedTitle, held)
+	eq("title profile: but still saves settings", Stats.get(a).das, 125)
+end
+
+function T.titleMigration()
+	local fresh = Stats.migrateForTest(nil)
+	check("title migration: a new profile owns ROOKIE", fresh.ownedTitles.rookie == true)
+	eq("title migration: and equips it", fresh.equippedTitle, "rookie")
+
+	local legacy = Stats.migrateForTest({ wins = 5, rating = 1200 })
+	check("title migration: an old profile gains ROOKIE", legacy.ownedTitles.rookie == true)
+	eq("title migration: keeping its stats", legacy.wins, 5)
+
+	local retired = Stats.migrateForTest({
+		ownedTitles = { elite = true, ancient_badge = true }, equippedTitle = "elite" })
+	check("title migration: a live id survives", retired.ownedTitles.elite == true)
+	check("title migration: a retired id is dropped", retired.ownedTitles.ancient_badge == nil)
+	eq("title migration: the equipped title is untouched", retired.equippedTitle, "elite")
+
+	local gone = Stats.migrateForTest({ ownedTitles = { elite = true }, equippedTitle = "ancient_badge" })
+	eq("title migration: equipping a retired title falls back", gone.equippedTitle, "rookie")
+	check("title migration: without losing the rest", gone.ownedTitles.elite == true)
+
+	local unowned = Stats.migrateForTest({ ownedTitles = {}, equippedTitle = "elite" })
+	eq("title migration: equipping something unowned falls back", unowned.equippedTitle, "rookie")
+
+	local junk = Stats.migrateForTest({ ownedTitles = "everything", equippedTitle = 42 })
+	check("title migration: a hostile ownership value yields the default only",
+		junk.ownedTitles.rookie == true and junk.ownedTitles.elite == nil)
+	eq("title migration: and the default equipped", junk.equippedTitle, "rookie")
+
+	-- Union on save, and every earlier merge rule still standing.
+	local stored = { ownedTitles = { elite = true }, equippedTitle = "elite",
+		ownedSkins = { classic = true, diamond = true }, equippedSkin = "diamond",
+		secretPuzzleSolved = true, bestBlitz = 40000, bestSprint = 38.5 }
+	local mine = Stats.migrateForTest({ ownedTitles = { veteran = true }, equippedTitle = "veteran",
+		ownedSkins = { classic = true, golden = true }, equippedSkin = "golden",
+		secretPuzzleSolved = false, bestBlitz = 12000, bestSprint = 55.0 })
+	local merged = Stats.mergeProgressForTest(stored, mine)
+	check("title merge: a title granted elsewhere survives", merged.ownedTitles.elite == true)
+	check("title merge: and so does this server's", merged.ownedTitles.veteran == true)
+	check("title merge: ROOKIE is never lost", merged.ownedTitles.rookie == true)
+	eq("title merge: equipped follows the saving server", merged.equippedTitle, "veteran")
+	check("title merge: skins still union", merged.ownedSkins.diamond and merged.ownedSkins.golden)
+	eq("title merge: the puzzle flag still ORs", merged.secretPuzzleSolved, true)
+	eq("title merge: the blitz best still maxes", merged.bestBlitz, 40000)
+	eq("title merge: the sprint best still mins", merged.bestSprint, 38.5)
+
+	-- A stale server cannot revoke.
+	local revoked = Stats.mergeProgressForTest({ ownedTitles = { elite = true } },
+		Stats.migrateForTest({ ownedTitles = {} }))
+	check("title merge: a stale save cannot take a title away", revoked.ownedTitles.elite == true)
+end
+
+-- The evaluator, including the two skins it now makes earnable.
+function T.titleAchievements()
+	local a = fakePlayer(-603, "Achiever")
+	Stats.load(a)
+	local p = Stats.get(a)
+	eq("achievements: nothing earned yet", #Stats.evaluateTitles(a), 0)
+
+	p.wins = 1
+	local first = Stats.evaluateTitles(a)
+	eq("achievements: the first win earns one title", #first, 1)
+	eq("achievements: which is FIRST WIN", first[1], "first_blood")
+	check("achievements: and it is owned", Stats.ownsTitle(a, "first_blood"))
+	eq("achievements: re-evaluating grants nothing", #Stats.evaluateTitles(a), 0)
+	check("achievements: nothing was auto-equipped", Stats.get(a).equippedTitle == "rookie")
+
+	-- QUAD MACHINE brings GOLDEN T with it, through the skin seam.
+	check("achievements: golden is not owned yet", not Stats.ownsSkin(a, "golden"))
+	p.quads = 100
+	local quad = Stats.evaluateTitles(a)
+	eq("achievements: the quad milestone earns one title", #quad, 1)
+	eq("achievements: which is QUAD MACHINE", quad[1], "quad_machine")
+	check("achievements: and GOLDEN T comes with it", Stats.ownsSkin(a, "golden"))
+	eq("achievements: re-evaluating grants nothing again", #Stats.evaluateTitles(a), 0)
+
+	-- Self-heal: the title without the skin is a state nobody can reach
+	-- honestly, so evaluation puts it back.
+	Stats.get(a).ownedSkins.golden = nil
+	Stats.evaluateTitles(a)
+	check("achievements: a missing linked skin is restored", Stats.ownsSkin(a, "golden"))
+
+	-- ELITE brings DIAMOND I.
+	check("achievements: diamond is not owned yet", not Stats.ownsSkin(a, "diamond"))
+	p.peakRating = 1500
+	local elite = Stats.evaluateTitles(a)
+	eq("achievements: the peak milestone earns ELITE", elite[1], "elite")
+	check("achievements: and DIAMOND I comes with it", Stats.ownsSkin(a, "diamond"))
+	-- Falling off the pace keeps both.
+	p.rating = 1050
+	Stats.evaluateTitles(a)
+	check("achievements: losing form does not revoke ELITE", Stats.ownsTitle(a, "elite"))
+	check("achievements: nor the skin", Stats.ownsSkin(a, "diamond"))
+
+	-- Nothing the evaluator does touches anything competitive.
+	local before = Stats.get(a)
+	local rating, ranked, blitz = before.rating, before.rankedWins, before.bestBlitz
+	Stats.evaluateTitles(a)
+	eq("achievements: rating untouched", Stats.get(a).rating, rating)
+	eq("achievements: ranked wins untouched", Stats.get(a).rankedWins, ranked)
+	eq("achievements: blitz best untouched", Stats.get(a).bestBlitz, blitz)
+	eq("achievements: the secret stays unsolved", Stats.get(a).secretPuzzleSolved, false)
+
+	-- Retroactive: an account that did all of it before titles existed.
+	local vet = fakePlayer(-604, "Veteran")
+	Stats.load(vet)
+	local v = Stats.get(vet)
+	v.wins, v.rankedWins, v.bestStreak = 40, 12, 7
+	v.quads, v.matches, v.peakRating = 150, 120, 1600
+	v.bestSprint, v.bestBlitz, v.secretPuzzleSolved = 44.2, 31000, true
+	local batch = Stats.evaluateTitles(vet)
+	eq("achievements: a veteran account unlocks everything at once", #batch, 9)
+	check("achievements: including the secret one", Stats.ownsTitle(vet, "secret_solver"))
+	check("achievements: and both linked skins",
+		Stats.ownsSkin(vet, "golden") and Stats.ownsSkin(vet, "diamond"))
+	eq("achievements: a second login grants nothing", #Stats.evaluateTitles(vet), 0)
+	eq("achievements: and still nothing is auto-equipped", Stats.get(vet).equippedTitle, "rookie")
+end
+
+-- Solving the secret is one transaction: flag, skin and title together.
+function T.titleSecretTransaction()
+	local p = fakePlayer(-605, "Finder")
+	Stats.load(p)
+	check("secret title: not solved yet", not Stats.hasSolvedSecret(p))
+	check("secret title: and no title", not Stats.ownsTitle(p, "secret_solver"))
+
+	eq("secret title: solving completes", Stats.completeSecretPuzzle(p), "completed")
+	check("secret title: the flag is set", Stats.hasSolvedSecret(p))
+	check("secret title: GALAXY CUBE is granted", Stats.ownsSkin(p, SkinData.SECRET_ID))
+	check("secret title: and SECRET SOLVER with it", Stats.ownsTitle(p, "secret_solver"))
+	eq("secret title: solving again does nothing", Stats.completeSecretPuzzle(p), "already solved")
+
+	-- Owning the skin by other means is not the same as having solved it.
+	local other = fakePlayer(-606, "Gifted")
+	Stats.load(other)
+	Stats.grantSkin(other, SkinData.SECRET_ID)
+	Stats.evaluateTitles(other)
+	check("secret title: owning GALAXY CUBE does not earn the title",
+		not Stats.ownsTitle(other, "secret_solver"))
+	check("secret title: and the puzzle is still unsolved for them",
+		not Stats.hasSolvedSecret(other))
+end
+
+-- Titles are cosmetic. This is the assertion that says so.
+function T.titlesAreCosmetic()
+	local source = game:GetService("ReplicatedStorage").Shared
+	for _, name in ipairs({ "Board", "Attack", "LockValidation", "BlitzScoring", "Net" }) do
+		local src = source:FindFirstChild(name)
+		check("cosmetic: " .. name .. " knows nothing about titles",
+			src ~= nil and src.Source:find("[Tt]itle") == nil)
+	end
+	local match = game:GetService("ServerScriptService").Services.MatchInstance.Source
+	-- The result card carries one, and nothing else in the match does.
+	local _, mentions = match:gsub("title", "")
+	check("cosmetic: MatchInstance mentions a title only on the result", mentions <= 3, tostring(mentions))
+	check("cosmetic: no title appears in a lock, snapshot or garbage message",
+		match:find("titleId") == nil)
+
+	-- And the remote catalog gained exactly one entry.
+	local folder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+	check("cosmetic: EquipTitle exists", folder:FindFirstChild("EquipTitle") ~= nil)
+	for _, forbidden in ipairs({ "GrantTitle", "UnlockTitle", "CompleteAchievement" }) do
+		check("cosmetic: there is no " .. forbidden .. " remote",
+			folder:FindFirstChild(forbidden) == nil)
+	end
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -2443,6 +2746,7 @@ function T.run(root: Instance?, services: Instance?)
 	Practice = require((services :: any).PracticeService)
 	BlitzScoring = require((root :: any).BlitzScoring)
 	LockValidation = require((root :: any).LockValidation)
+	TitleData = require((root :: any).TitleData)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
 	SkinData = require((root :: any).SkinData)
@@ -2460,6 +2764,8 @@ function T.run(root: Instance?, services: Instance?)
 		"blitzScoring", "blitzSession", "blitzEnding", "blitzPersistence",
 		"remoteCatalog", "blitzAbandon", "settlementIdempotence", "profileRoundTrip",
 		"sharedValidator",
+		"titleCatalog", "titleRequirements", "titleProfile", "titleMigration",
+		"titleAchievements", "titleSecretTransaction", "titlesAreCosmetic",
 		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])

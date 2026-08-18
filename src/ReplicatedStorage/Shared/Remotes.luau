@@ -22,6 +22,10 @@ local RELIABLE = {
 	-- c->s { skinId }. A request, never a claim: ownership lives in the profile
 	-- and is decided server side. There is deliberately no remote that grants.
 	"EquipSkin",
+	-- c->s { titleId }. Same contract as EquipSkin: a request, never a claim.
+	-- There is deliberately no remote that grants a title or completes an
+	-- achievement -- both are decided from the profile, server side.
+	"EquipTitle",
 }
 
 local UNRELIABLE = {
