@@ -5,6 +5,7 @@
 -- near-opaque dark surfaces with a hairline stroke, accents are used sparingly,
 -- and nothing glows except the thing you are meant to press.
 
+local GuiService = game:GetService("GuiService")
 local Theme = {}
 
 Theme.C = {
@@ -153,6 +154,48 @@ function Theme.eyebrow(parent: Instance?, text: string, colour: Color3?, props: 
 end
 
 -- Scales the whole UI off a 1080p reference so it holds up on any resolution.
+-- How far down an inset-ignoring ScreenGui the first usable pixel is, measured
+-- in that GUI's own offset units.
+--
+-- Two things conspire here. The screen GUI ignores the Roblox top bar so the
+-- backdrop can go full bleed, which puts its origin ABOVE the usable area; and
+-- autoScale below then shrinks every offset inside it. Anything anchored to the
+-- top has to add the inset back, divided by that scale, or it renders behind
+-- the top bar -- which is where the lobby header and the touch FORFEIT button
+-- both were.
+function Theme.topInset(gui: Instance?): number
+	if not gui then return 0 end
+	local scale = gui:FindFirstChildOfClass("UIScale")
+	local s = (scale and scale.Scale) or 1
+	if s <= 0 then s = 1 end
+	return GuiService:GetGuiInset().Y / s
+end
+
+-- Pins a top-anchored object below the Roblox top bar, and keeps it there.
+--
+-- Sampling the inset once is not enough: the client builds its whole interface
+-- on the first frame, and GetGuiInset() still reports zero that early. Both the
+-- lobby header and the touch FORFEIT button were placed against that zero and
+-- ended up behind the bar for the rest of the session.
+function Theme.pinTop(object: GuiObject, gui: Instance, offsetY: number)
+	local x = object.Position.X
+	local function apply()
+		object.Position = UDim2.new(x.Scale, x.Offset, 0, offsetY + Theme.topInset(gui))
+	end
+	apply()
+	pcall(function()
+		GuiService:GetPropertyChangedSignal("TopbarInset"):Connect(apply)
+	end)
+	-- The scale divisor moves with the viewport, so the offset has to follow it.
+	local cam = workspace.CurrentCamera
+	if cam then
+		cam:GetPropertyChangedSignal("ViewportSize"):Connect(apply)
+	end
+	-- One late pass for clients where neither signal fires before the bar exists.
+	task.delay(1, apply)
+	return object
+end
+
 function Theme.autoScale(gui: Instance): UIScale
 	local scale = Instance.new("UIScale")
 	scale.Parent = gui

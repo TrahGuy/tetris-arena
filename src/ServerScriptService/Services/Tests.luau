@@ -21,7 +21,7 @@
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
-	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring
+	GlobalRank, Enums, SkinData, PuzzleService, Practice, BlitzScoring, LockValidation
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -1966,9 +1966,14 @@ function T.blitzSession()
 	-- Placements the board cannot produce.
 	eq("blitz: an unreachable placement is refused",
 		(place(live + 1, { x = 99, y = 99 })), "placement is not reachable")
+	-- Sessions are seeded with math.random, so claiming "some other piece" is
+	-- not reliably illegal: the hold may legitimately swap into it. Spending
+	-- the hold first makes the claim impossible whatever the seed rolled.
+	board.holdUsed = true
 	eq("blitz: a piece that is not in play is refused",
-		(place(live + 2, { kind = board.piece.kind % 7 + 1, hold = nil })),
+		(place(live + 2, { kind = board.piece.kind % 7 + 1 })),
 		"piece is not the one in play")
+	board.holdUsed = false
 	eq("blitz: a malformed placement is refused",
 		(place(live + 3, { rot = 9 })), "malformed placement")
 
@@ -2118,6 +2123,182 @@ function T.blitzPersistence()
 	eq("blitz best: a sprint does not touch it", Stats.get(player).bestBlitz, 20000)
 end
 
+-- == Release hardening (Phase 16) =========================================
+
+-- Every remote the game declares should be one the game uses. A declared
+-- RemoteEvent nobody fires is an instance sitting in ReplicatedStorage that a
+-- client can call and that a reader has to reason about.
+function T.remoteCatalog()
+	local folder = game:GetService("ReplicatedStorage"):FindFirstChild("Remotes")
+	check("remotes: the folder exists", folder ~= nil)
+	if not folder then return end
+
+	local EXPECTED = {
+		QueueRequest = true, QueueCancel = true, MatchUpdate = true, Lock = true,
+		Garbage = true, Result = true, Resync = true, Forfeit = true,
+		Practice = true, Profile = true, SaveSettings = true, EquipSkin = true,
+		Snapshot = true,
+	}
+	local found = {}
+	for _, r in ipairs(folder:GetChildren()) do
+		found[r.Name] = true
+		check("remotes: " .. r.Name .. " is one the game uses", EXPECTED[r.Name] == true)
+	end
+	for name in pairs(EXPECTED) do
+		check("remotes: " .. name .. " exists", found[name] == true)
+	end
+	check("remotes: the dead Leaderboard remote is gone", found.Leaderboard == nil)
+end
+
+-- Quitting a Blitz run has to reach the server.
+--
+-- The client used to tear down its own board and say nothing, leaving the
+-- session counting down on the server with nobody playing it. When the deadline
+-- passed it was finalized as a completed run and could set a personal best --
+-- the one score that is documented as not counting.
+function T.blitzAbandon()
+	local player = fakePlayer(-501, "Quitter")
+	Stats.load(player) -- so the refusal below is about the run, not a missing profile
+	local T0 = 5000
+	local session = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	check("abandon: the run is live", Practice.isBusy(player))
+
+	local result = Practice.finalize(player, "abandoned")
+	check("abandon: it ends", result ~= nil)
+	eq("abandon: reported as abandoned", result.reason, "abandoned")
+	check("abandon: and does not count", result.counts == false)
+	eq("abandon: so it can never set a record",
+		Stats.recordBlitz(player, result), "not counted")
+	eq("abandon: leaving the best where it was", Stats.get(player).bestBlitz, 0)
+
+	-- And once abandoned the deadline must not resurrect it as a finished run.
+	local due = Practice.step(session.endAt + 1)
+	eq("abandon: the deadline finds nothing left to finalize", #due, 0)
+	Practice.forget(player)
+
+	-- The two endings that DO count, for contrast.
+	local s2 = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	local timed = Practice.step(s2.endAt)[1]
+	check("abandon: a run played to time still counts", timed.result.counts)
+	Practice.forget(player)
+
+	local s3 = Practice.begin(player, Enums.Mode.Blitz, T0, T0)
+	local _, topped = Practice.onLock(player, { sessionId = s3.id, topout = true }, s3.startAt + 1)
+	check("abandon: and so does a top-out", topped.counts)
+	Practice.forget(player)
+end
+
+-- Settlement happens once, however many times it is asked for.
+function T.settlementIdempotence()
+	-- A match cannot finish twice.
+	local a = fakePlayer(-502, "One")
+	local b = fakePlayer(-503, "Two")
+	local m = MatchInstance.new(7001, { player = a }, { player = b }, { mode = "ranked" })
+	local finishes = 0
+	m.onFinished = function() finishes += 1 end
+	m:playerLeft(a)
+	m:playerLeft(a)
+	m:playerLeft(b)
+	m:forfeit(b)
+	eq("idempotence: a match settles exactly once", finishes, 1)
+
+	-- Puzzle release can be called until the cows come home.
+	local nook = fakeNook()
+	local svc = PuzzleService.new({ stats = fakeStats(), matchmaking = fakeMatchmaking() })
+	svc:bind(nook)
+	local p = nookPlayer("Releaser", Vector3.new(110, 4, -105))
+	svc:takePiece(p, 1, 0)
+	svc:release("first")
+	svc:release("second")
+	svc:release("third")
+	check("idempotence: releasing a released puzzle is harmless", svc.session == nil)
+	local home = true
+	for index, part in pairs(svc.pieces) do
+		if (part.Position - svc.home[index].cframe.Position).Magnitude > 0.01 then home = false end
+	end
+	check("idempotence: and leaves the blocks where they were built", home)
+	p._char:Destroy()
+	nook:Destroy()
+
+	-- A Blitz run finalizes once.
+	local runner = fakePlayer(-504, "Runner")
+	local session = Practice.begin(runner, Enums.Mode.Blitz, 6000, 6000)
+	check("idempotence: the first finalize returns a result",
+		Practice.finalize(runner, "time") ~= nil)
+	check("idempotence: the second returns nothing",
+		Practice.finalize(runner, "time") == nil)
+	check("idempotence: and so does a third",
+		Practice.finalize(runner, "topout") == nil)
+	Practice.forget(runner)
+end
+
+-- Everything a profile has learned since Phase 8, through one save/load.
+function T.profileRoundTrip()
+	local stored = {
+		wins = 12, losses = 7, streak = 3, bestStreak = 9,
+		lines = 480, quads = 22, matches = 19, bestSprint = 41.5,
+		rating = 1284, peakRating = 1310, rankedWins = 6, rankedLosses = 4, rankedDraws = 1,
+		das = 110, arr = 12, music = 45, sfx = 70, colourblind = true,
+		ownedSkins = { classic = true, golden = true, galaxy = true },
+		equippedSkin = "golden",
+		secretPuzzleSolved = true,
+		bestBlitz = 47250,
+	}
+	local p = Stats.migrateForTest(stored)
+	for _, field in ipairs({ "wins", "losses", "streak", "bestStreak", "lines", "quads",
+		"matches", "bestSprint", "rating", "peakRating", "rankedWins", "rankedLosses",
+		"rankedDraws", "das", "arr", "music", "sfx", "bestBlitz" }) do
+		eq("roundtrip: " .. field, p[field], stored[field])
+	end
+	eq("roundtrip: colourblind", p.colourblind, true)
+	eq("roundtrip: equipped skin", p.equippedSkin, "golden")
+	check("roundtrip: owned skins survive",
+		p.ownedSkins.classic and p.ownedSkins.golden and p.ownedSkins.galaxy)
+	eq("roundtrip: the secret stays solved", p.secretPuzzleSolved, true)
+
+	-- And the merge that runs on save keeps every one of them.
+	local merged = Stats.mergeProgressForTest(stored, p)
+	eq("roundtrip: merge keeps the blitz best", merged.bestBlitz, 47250)
+	eq("roundtrip: merge keeps the completion", merged.secretPuzzleSolved, true)
+	check("roundtrip: merge keeps ownership",
+		merged.ownedSkins.golden and merged.ownedSkins.galaxy)
+end
+
+-- The shared validator is the one both paths use. If a future edit forks them
+-- again, this is the assertion that notices.
+function T.sharedValidator()
+	local source = game:GetService("ServerScriptService").Services.MatchInstance.Source
+	check("validator: MatchInstance requires the shared one",
+		source:find("LockValidation") ~= nil)
+	check("validator: and does not carry its own reachability check",
+		source:find("b:reachable") == nil)
+	local practice = game:GetService("ServerScriptService").Services.PracticeService.Source
+	check("validator: so does the solo path", practice:find("LockValidation") ~= nil)
+
+	-- It behaves the same for both callers, which is the point of sharing it.
+	local b = Board.new(99)
+	local p = b.piece
+	local ok = LockValidation.accept(b, { kind = p.kind, rot = p.rot, x = p.x, y = b:ghostY() })
+	check("validator: a legal placement is accepted", ok)
+	local b2 = Board.new(99)
+	local bad, why = LockValidation.accept(b2, { kind = b2.piece.kind, rot = 1, x = 99, y = 99 })
+	check("validator: an illegal one is not", not bad)
+	eq("validator: with the reason the match path reports", why, "placement is not reachable")
+	local b3 = Board.new(99)
+	local junk = LockValidation.accept(b3, { kind = "x", rot = nil, x = {}, y = 0 / 0 })
+	check("validator: junk is refused rather than thrown", not junk)
+
+	-- Claiming a piece that is neither in play nor legally holdable, on a board
+	-- whose seed is ours, so the message is the same every run.
+	local b4 = Board.new(1234)
+	b4.hold, b4.holdUsed = nil, true -- no swap available
+	local other = (b4.piece.kind % 7) + 1
+	local swapped, reason = LockValidation.accept(b4,
+		{ kind = other, rot = 1, x = b4.piece.x, y = b4:ghostY() })
+	check("validator: a piece the player is not holding is refused", not swapped)
+	eq("validator: and says so", reason, "piece is not the one in play")
+end
+
 -- Human vs human, without two clients.
 --
 -- Studio over MCP can only drive one player, so the one path the live tests
@@ -2261,6 +2442,7 @@ function T.run(root: Instance?, services: Instance?)
 	Stats = require((services :: any).StatsService)
 	Practice = require((services :: any).PracticeService)
 	BlitzScoring = require((root :: any).BlitzScoring)
+	LockValidation = require((root :: any).LockValidation)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
 	SkinData = require((root :: any).SkinData)
@@ -2276,6 +2458,8 @@ function T.run(root: Instance?, services: Instance?)
 		"skinCatalog", "skinOwnership", "skinMigration", "skinIsCosmetic",
 		"puzzleGeometry", "puzzleSolving", "puzzleSessions", "puzzlePersistence",
 		"blitzScoring", "blitzSession", "blitzEnding", "blitzPersistence",
+		"remoteCatalog", "blitzAbandon", "settlementIdempotence", "profileRoundTrip",
+		"sharedValidator",
 		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])

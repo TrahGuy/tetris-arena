@@ -35,6 +35,7 @@ open at that path). Move it in here when convenient.
 | 13 — Skin ownership and equip | done |
 | 14 — Secret puzzle and reward | done |
 | 15 — Blitz mode | done |
+| 16 — Release hardening | done — see [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -64,7 +65,8 @@ description — so swap any that sound wrong. One line each.
 | Only one skin can be earned | The secret nook pays out GALAXY CUBE. GOLDEN T and DIAMOND I still have no source; they wait on the same server-only grant an achievement or a purchase would use. No monetisation is implemented. |
 | WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
 | Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
-| Never tested with two live humans | Studio over MCP drives one client. `Tests.twoPlayer` covers the path headlessly: two stand-in clients run their own boards and report locks exactly as `Main.client` does, with garbage and resync mirrored back the way the remotes deliver them. |
+| Never tested with two live clients | Studio over MCP drives one client, and Studio's two-player local server is a Test-tab action with no scriptable entry point. Everything one client can reach has been exercised against a real server datamodel over real RemoteEvents — including a full bot match, garbage, KO, results and rematch. The two-sided logic is covered headlessly by `Tests.twoPlayer`. What remains genuinely untested is two real LocalScripts against each other: human-versus-human pairing in Quick, Ranked and Private, and a ranked disconnect driven by a real `PlayerRemoving`. [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md) marks exactly those boxes. |
+| Touch and gamepad are untested on hardware | Both were exercised in Studio: touch layout and safe area were measured against the real top-bar inset, and the gamepad DPad and hard drop were driven through the real bindings. Roblox's VirtualInput refuses to synthesise ButtonB/X/Y/L1/R1/Select, so those bindings are unverified, as is anything about a real finger on real glass. |
 
 ## Competitive integrity
 
@@ -351,6 +353,42 @@ Sprint is unchanged and still on its Phase 10 path: the server times the session
 and vets the claim rather than shadowing the board. Blitz needed the shadow
 because it has a number worth cheating for; rewriting a working mode to match
 would have been a redesign nobody asked for.
+
+## Release hardening
+
+Phase 16 added no features. It went looking for evidence, and found four things
+worth fixing.
+
+**Quitting a Blitz run did not reach the server.** The client tore down its own
+board and returned to the lobby while the session kept counting down with nobody
+playing it; when the deadline passed the server finalized it as a completed run
+and it could set a personal best. Abandoning is the one ending that is documented
+as not counting, and it was the one that counted.
+
+**The touch FORFEIT button and the lobby header were behind the Roblox top bar.**
+The screen GUI ignores the top-bar inset so the backdrop can go full bleed, which
+puts its origin above the usable area — and both elements were positioned as if
+it did not. FORFEIT was unreachable on exactly the devices the touch controls
+exist for, and nobody had ever seen their own rating in the lobby. Sampling the
+inset once is not enough either: the interface is built on the first frame, when
+`GetGuiInset()` still reports zero, so `Theme.pinTop` re-applies it when the bar
+appears.
+
+**A gamepad could play but could not leave.** Nothing in the game ever set
+`GuiService.SelectedObject`, so a pad user had no button to navigate from —
+REMATCH, BACK TO LOBBY, CANCEL and SETTINGS were all mouse-only. The screens now
+select their obvious button when they open, but only while a gamepad is the
+input in use, so mouse players do not get a selection box they did not ask for.
+
+**Junk sent at the queue remote queued the player.** A non-table payload fell
+through to Quick. Firing garbage at a remote should not put somebody in a match.
+
+Everything else held. 798 malformed payloads across all seven client-to-server
+remotes produced no server errors; three full solo sessions leaked one Frame and
+no sounds; every audio cue loads. The hottest server path is `Board:reachable`
+at 0.9 ms on a messy board and 2.9 ms on an empty one — it was measured rather
+than guessed, and left alone, because changing it would risk the competitive
+validation Phases 10 and 11 exist to guarantee.
 
 ## Tests
 

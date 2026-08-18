@@ -64,9 +64,11 @@ local limits = {
 
 Remotes.QueueRequest.OnServerEvent:Connect(function(player, msg)
 	if not limits.queue:allow(player) then return end
-	local mode = type(msg) == "table" and msg.mode or Enums.Mode.Quick
-	if type(mode) ~= "string" then return end
-	Matchmaking.enqueue(player, mode)
+	-- A non-table used to fall through to Quick, so firing junk at this remote
+	-- put the player in a queue they never asked for. The real client always
+	-- sends a table.
+	if type(msg) ~= "table" or type(msg.mode) ~= "string" then return end
+	Matchmaking.enqueue(player, msg.mode)
 end)
 
 Remotes.QueueCancel.OnServerEvent:Connect(function(player)
@@ -140,6 +142,17 @@ end)
 Remotes.Practice.OnServerEvent:Connect(function(player, msg)
 	if not limits.ui:allow(player) then return end
 	if type(msg) ~= "table" then return end
+	-- Quitting a Blitz run. Ends it without recording anything: an abandoned
+	-- run is not a score, and a session left counting down would be finalized
+	-- as a completed one when its deadline passed.
+	if msg.abandon then
+		local session = Practice.sessionFor(player)
+		if session and tonumber(msg.sessionId) == session.id then
+			Practice.finalize(player, "abandoned")
+			Practice.forget(player)
+		end
+		return
+	end
 	if msg.finished then
 		-- Nobody finishes a practice run from inside a match.
 		if Matchmaking.matchFor(player) then return end

@@ -215,6 +215,14 @@ local function startSim(seed: number, opts: any, info: any?)
 		onForfeit = function()
 			if matchInfo and matchInfo.networked then
 				Remotes.Forfeit:FireServer({ matchId = matchInfo.matchId })
+			elseif matchInfo and matchInfo.blitz then
+				-- Quitting has to reach the server, or the run keeps counting
+				-- down without anybody playing it and is recorded as a finished
+				-- one when the deadline arrives -- which is exactly the score
+				-- that is not supposed to count.
+				Remotes.Practice:FireServer({ sessionId = matchInfo.sessionId, abandon = true })
+				teardownMatch()
+				setState(Enums.State.Idle)
 			else
 				teardownMatch()
 				setState(Enums.State.Idle)

@@ -101,6 +101,13 @@ Addressing: solo locks carry `sessionId`, competitive locks carry `matchId`. A p
 Timing: `startAt`/`endAt` on `workspace:GetServerTimeNow()`. The server finalizes on its own clock; late locks score nothing.
 Persistence: `bestBlitz` on the profile, merged with MAX. Only a run that expired or topped out may set it; abandoning does not. No Elo, no ranked counters, no global index.
 
+## Release
+
+Top-anchored UI must go through `Theme.pinTop`: the screen GUI ignores the top-bar inset, and `GetGuiInset()` reads zero on the first frame.
+Gamepad: any modal screen sets `GuiService.SelectedObject` on open and clears it on close, only while a gamepad is the active input.
+Every client-to-server remote requires a table and validates its own fields; a non-table is a no-op, never a default.
+Blitz: quitting sends `{ sessionId, abandon = true }`. Abandoned runs never set a record.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

@@ -5,7 +5,9 @@
 -- the same room: this handles the states the world cannot show — searching,
 -- results, settings, help — and leaves "start a match" to the pads.
 
+local GuiService = game:GetService("GuiService")
 local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 
@@ -52,6 +54,8 @@ function LobbyUi.new(parent: Instance, hooks: any)
 	chrome.Parent = parent
 	self.chrome = chrome
 
+	-- Same inset trap as the touch pad: the header sat behind the Roblox top
+	-- bar, so nobody ever saw their own rating in the lobby.
 	local top = Theme.panel(chrome, {
 		BackgroundTransparency = 0.15,
 		Position = UDim2.new(0.5, 0, 0, 14),
@@ -62,6 +66,7 @@ function LobbyUi.new(parent: Instance, hooks: any)
 		Font = Theme.F.display, TextSize = 18, TextXAlignment = Enum.TextXAlignment.Left,
 		Position = UDim2.fromOffset(18, 0), Size = UDim2.fromOffset(180, 42),
 	})
+	Theme.pinTop(top, parent, 14)
 	self.countLabel = Theme.label(top, "", {
 		TextColor3 = Theme.C.muted, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Right,
 		Position = UDim2.fromOffset(240, 0), Size = UDim2.fromOffset(200, 42),
@@ -123,6 +128,7 @@ function LobbyUi.new(parent: Instance, hooks: any)
 		Position = UDim2.fromOffset(0, 142), Size = UDim2.fromOffset(340, 42),
 	})
 	self.queue = queue
+	self.cancelBtn = cancel
 
 	-- ── Results ───────────────────────────────────────────────────────────
 	local results = screen(parent, "Results")
@@ -166,6 +172,7 @@ function LobbyUi.new(parent: Instance, hooks: any)
 		Position = UDim2.fromOffset(212, 256), Size = UDim2.fromOffset(196, 46),
 	})
 	self.rematchBtn = rematch
+	self.backBtn = backBtn
 	self.results = results
 
 	-- ── How to play ───────────────────────────────────────────────────────
@@ -251,8 +258,14 @@ function LobbyUi.new(parent: Instance, hooks: any)
 	self.settingsScreen = settings
 
 	-- ── Wiring ────────────────────────────────────────────────────────────
-	help.Activated:Connect(function() howto.Visible = true end)
-	howClose.Activated:Connect(function() howto.Visible = false end)
+	help.Activated:Connect(function()
+		howto.Visible = true
+		self:_select(howClose)
+	end)
+	howClose.Activated:Connect(function()
+		howto.Visible = false
+		self:_select(nil)
+	end)
 	settingsBtn.Activated:Connect(function()
 		self:_refreshSliders()
 		settings.Visible = true
@@ -306,6 +319,14 @@ function LobbyUi.new(parent: Instance, hooks: any)
 	end
 
 	self:_refreshSliders()
+
+	-- A player who puts the mouse down and picks up a pad mid-screen should get
+	-- a selection without having to close and reopen anything.
+	UserInputService.LastInputTypeChanged:Connect(function(kind)
+		if kind == Enum.UserInputType.Gamepad1 and self.selected then
+			GuiService.SelectedObject = self.selected
+		end
+	end)
 	return self
 end
 
@@ -389,9 +410,34 @@ function LobbyUi:toast(title: string, sub: string?, colour: Color3?)
 	end)
 end
 
+-- Gamepad reachability.
+--
+-- Every screen here is made of TextButtons, which Roblox will happily navigate
+-- between with a stick -- but only once something is selected to navigate FROM.
+-- Nothing ever selected anything, so a player on a pad could play the board and
+-- then not be able to press BACK TO LOBBY. This picks the obvious button when a
+-- screen opens and lets go when it closes.
+--
+-- Only while a gamepad is actually the input in use: setting SelectedObject for
+-- a mouse player draws a selection box around a button they did not ask to
+-- highlight.
+function LobbyUi:_select(button: Instance?)
+	self.selected = button
+	if not button then
+		if GuiService.SelectedObject and GuiService.SelectedObject:IsDescendantOf(self.chrome.Parent) then
+			GuiService.SelectedObject = nil
+		end
+		return
+	end
+	if UserInputService:GetLastInputType() == Enum.UserInputType.Gamepad1 then
+		GuiService.SelectedObject = button
+	end
+end
+
 function LobbyUi:showQueue(on: boolean)
 	self.queue.Visible = on
 	self.chrome.Visible = not on
+	self:_select(on and self.cancelBtn or nil)
 end
 
 function LobbyUi:setQueueInfo(elapsed: number, botIn: number?, note: string?, title: string?)
@@ -456,11 +502,13 @@ function LobbyUi:showResults(payload: any, canRematch: boolean)
 	self.resultStats["BEST COMBO"].Text = tostring(s.bestCombo or 0)
 	self.rematchBtn.Visible = canRematch
 	self.results.Visible = true
+	self:_select(canRematch and self.rematchBtn or self.backBtn)
 	self.chrome.Visible = false
 end
 
 function LobbyUi:hideResults()
 	self.results.Visible = false
+	self:_select(nil)
 	self.chrome.Visible = true
 end
 

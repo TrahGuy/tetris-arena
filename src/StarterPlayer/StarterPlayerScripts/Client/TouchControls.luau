@@ -156,7 +156,13 @@ function TouchControls.new(parent: Instance, input: any)
 		end)
 	end
 
-	local forfeit = pad(root, "BA_Forfeit", UDim2.new(0, 22, 0, 22), UDim2.fromOffset(84, 34), Theme.C.red)
+	-- The screen GUI ignores the inset so the backdrop can go full bleed, which
+	-- means anything measured from the top starts BEHIND the Roblox top bar.
+	-- FORFEIT was sitting entirely underneath it: present, and unreachable on
+	-- exactly the devices these controls exist for.
+	local forfeit = pad(root, "BA_Forfeit", UDim2.new(0, 22, 0, 22),
+		UDim2.fromOffset(84, 34), Theme.C.red)
+	Theme.pinTop(forfeit, parent, 22)
 	forfeit.AnchorPoint = Vector2.new(0, 0)
 	caption(forfeit, "FORFEIT", Theme.C.red)
 	forfeit.Activated:Connect(function()
