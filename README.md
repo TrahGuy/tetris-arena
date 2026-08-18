@@ -33,6 +33,7 @@ open at that path). Move it in here when convenient.
 | 11 — T-spin scoring and attack | done |
 | 12 — Global ranked leaderboard | done |
 | 13 — Skin ownership and equip | done |
+| 14 — Secret puzzle and reward | done |
 
 **Phase 2 was reinterpreted.** It was written before the lobby had physical
 matchmaking pads. A fullscreen PLAY menu on top of them would be two front doors
@@ -59,8 +60,7 @@ description — so swap any that sound wrong. One line each.
 | --- | --- |
 | No Blitz mode | Practice is a 40-line Sprint with a clock and a saved best. A 2-minute score attack would need its own scoring table, which does not exist. |
 | A forged spin witness buys a placement the player could have spun into | The server verifies the rotation is legal and lands where it says, not that it happened. A patched client can claim a spin for a T it dropped into the same slot — a position it would have had to build anyway — and doing so desyncs its own board against the shadow, which resyncs it. Closing the gap entirely means replaying inputs, not placements. |
-| Skins have no way to be earned yet | Ownership, equipping and persistence are real; what is missing is any source of unlocks. Everything hangs off one server-only grant, so an achievement, the secret puzzle or a purchase all plug into the same call. No monetisation is implemented. |
-| Secret puzzle has no solve logic | Geometry and attributes are in place; nothing reads them. |
+| Only one skin can be earned | The secret nook pays out GALAXY CUBE. GOLDEN T and DIAMOND I still have no source; they wait on the same server-only grant an achievement or a purchase would use. No monetisation is implemented. |
 | WIN STREAK and TOP SCORES are server-local | Only WORLD RANK is global. Both panels say so in their titles. Globalising them would mean an ordered index per statistic, which is a lot of write budget for a sign. |
 | Practice results are bounded, not replayed | The server times the session and rejects anything inconsistent with it, but it does not simulate the run. Proving a sprint outright means replaying the client's inputs against a server board. |
 | Never tested with two live humans | Studio over MCP drives one client. `Tests.twoPlayer` covers the path headlessly: two stand-in clients run their own boards and report locks exactly as `Main.client` does, with garbage and resync mirrored back the way the remotes deliver them. |
@@ -260,9 +260,54 @@ no client can write or even see:
 game.ServerStorage.Debug:SetAttribute("GrantSkin", "12345678:golden")
 ```
 
+## The secret nook
+
+There is an unfinished 5x5 board in the far corner of the lobby with a T-shaped
+hole in it and four loose blocks on the floor. It has been there since Phase 1.
+Filling the hole unlocks **GALAXY CUBE** — the exhibit the museum has labelled
+SECRET all along.
+
+**It is not signposted, and it should stay that way.** No marker, no arrow, no
+sign. The lamp over it is deliberately faint. The only thing that announces the
+puzzle is a prompt that appears when you are already standing in front of it.
+
+**How it works.** `PuzzleService` discovers the nook rather than describing it:
+slots come from the `SlotIndex` attributes on the board, blocks from
+`PieceIndex`, and the layout stays whatever `04_zones.luau` built. If the
+geometry is not what it expects — wrong count, duplicate index, missing board —
+it warns once and switches itself off instead of taking the lobby down.
+
+Interaction is a server-owned `ProximityPrompt` on each block and each cell, so
+`Triggered` arrives on the server already attributed to a player: **there is no
+puzzle remote at all**, nothing to forge, and it works on a keyboard, a
+controller and a phone without any of them being special-cased. The server still
+re-checks distance, because a prompt is a request like any other.
+
+**One solver at a time.** The nook is a single physical object in a shared
+world, so the first eligible player to pick up a block reserves it. Everyone
+else is refused until they finish, disconnect, wander into a match or a queue,
+lose their character, or go quiet for 45 seconds. Every one of those ends in the
+same place — the blocks go back where they were built, the prompts come back,
+and `Board.Solved` returns to false. The physical board is never left solved:
+that attribute is this-moment world state, not anybody's record.
+
+**The record is in the profile.** `secretPuzzleSolved` is its own field, because
+owning the skin and having found the puzzle are different facts — an account can
+hold GALAXY CUBE from a grant without ever having seen the nook, and someone who
+already owns it still gets credit for solving. Completion only ever moves from
+false to true: with no session lock an older server can save after a newer one,
+and finding the secret is not something a stale write gets to undo. A profile
+that solved it but somehow lacks the skin is healed on load.
+
+The reward goes through the same seam as every other unlock —
+`StatsService.grantSkin` — inside one transaction that records the completion,
+grants the skin and pushes the profile once, so the client never sees a solve
+that has not paid or a payment for a solve that was not recorded. Solving twice
+does nothing at all.
+
 ## Tests
 
-473 assertions. **Run them in Play mode, from the Server datamodel:**
+558 assertions. **Run them in Play mode, from the Server datamodel:**
 
 ```lua
 require(game.ServerScriptService.Services.Tests).run()
@@ -363,20 +408,18 @@ pools of light: ambient 26/26/31, coffer lights at 112 range and 0.8 brightness.
 
 ## What is built but not yet wired
 
-The lobby is physically complete. These are geometry plus attributes, waiting on
-the phase that owns the logic — none of them need the world to change again.
+The lobby was finished physically long before it was finished behaviourally, and
+for a long time this table was most of it. The queue pads, the leaderboard rows,
+the museum exhibits and the secret board have all since been wired to the
+services that own them, each one by reading the attributes the builders already
+set rather than by changing the world.
 
-| Thing | Hook | Owed by |
+| Thing | Hook | Still owed |
 | --- | --- | --- |
-| PLAY / RANKED / CREATE ROOM pads | `PadMode` attribute on each `Pad_*` part | Phase 5 |
-| Practice pad | `PadMode = "practice"` | Phase 4.5 |
-| Leaderboard rows | `PANELS` table in `03_stations.luau` | Phase 8 |
-| Museum exhibits | display only | whenever skins exist |
-| Emote pad / idle rewards | `PadMode = "emote"` | Phase 7 |
-| Secret puzzle | `Board` folder attrs `Puzzle`, `Solved`; `SlotIndex` / `PieceIndex` | later |
+| Emote pad / idle rewards | `PadMode = "emote"` | the lounge pad is read and deliberately does nothing |
 
-Walking through the open portal currently leads to a small empty alcove. Phase 5
-turns that into the match hand-off.
+Walking through the open portal leads to a small alcove that Phase 5 turned into
+the match hand-off.
 
 ## Client FX
 

@@ -20,6 +20,11 @@ local SkinData = {}
 -- the board has to be renderable before any entitlement question is asked.
 SkinData.DEFAULT_ID = "classic"
 
+-- What the secret nook pays out. Named here rather than in the puzzle so the
+-- catalog stays the one place that knows which skins exist and what they are
+-- for; the museum has labelled this exhibit SECRET since Phase 1.
+SkinData.SECRET_ID = "galaxy"
+
 -- Palettes are indexed by piece id: I O T S Z J L, then garbage at 8.
 --
 -- Every one of them keeps the seven hues separated. A skin is allowed to change
@@ -230,6 +235,11 @@ function SkinData.validate(): (boolean, { string })
 	end
 	if defaults ~= 1 then
 		table.insert(problems, ("exactly one skin may be owned by default, found %d"):format(defaults))
+	end
+	if not byId[SkinData.SECRET_ID] then
+		table.insert(problems, "the secret reward skin is not in the catalog")
+	elseif byId[SkinData.SECRET_ID].defaultOwned then
+		table.insert(problems, "the secret reward skin is owned by default, so it is not a reward")
 	end
 	if #SkinData.COLOURBLIND ~= 8 then
 		table.insert(problems, "the colourblind palette needs eight entries")

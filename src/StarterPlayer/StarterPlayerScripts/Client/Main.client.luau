@@ -66,6 +66,9 @@ local settings = {}
 -- Display state only. The server decides both of these; this is the last thing
 -- it told us, used to draw the board and to label the museum.
 local ownedSkins, equippedSkin = { [SkinData.DEFAULT_ID] = true }, SkinData.DEFAULT_ID
+-- nil until the first profile arrives, so a player who solved the nook in an
+-- earlier session is not congratulated again the moment they log in.
+local secretSolved = nil
 
 local hud = Hud.new(gui, {})
 local ui
@@ -271,6 +274,22 @@ end, function(pad)
 	return skin.name, "LOCKED  ·  " .. skin.description
 end)
 
+-- Already-solved players get told so where they would otherwise get a prompt
+-- that can no longer pay anything. Written on the client only: a local change to
+-- a replicated instance never leaves this machine, so it relabels the nook for
+-- this player without touching anyone else's.
+local function markNookSolved()
+	local lobby = workspace:FindFirstChild("Lobby")
+	local secret = lobby and lobby:FindFirstChild("Secret")
+	if not secret then return end
+	for _, d in ipairs(secret:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			d.ActionText = "Solved"
+			d.ObjectText = "Secret"
+		end
+	end
+end
+
 -- ── Server messages ───────────────────────────────────────────────────────
 
 Remotes.MatchUpdate.OnClientEvent:Connect(function(msg)
@@ -403,6 +422,20 @@ Remotes.Profile.OnClientEvent:Connect(function(profile)
 		equippedSkin = profile.equippedSkin
 		hud:setSkin(equippedSkin)
 	end
+
+	-- The secret nook pays out through the profile like everything else, so
+	-- there is no reward remote to fake: the moment this flips is the moment
+	-- the server recorded it.
+	local solvedNow = profile.secretPuzzleSolved == true
+	if solvedNow and secretSolved == false then
+		local skin = SkinData.get(SkinData.SECRET_ID)
+		ui:toast("SECRET SOLVED", (skin and skin.name or "A skin") .. " unlocked", Theme.C.mg)
+		SoundKit.play("go", 0.8)
+	end
+	if solvedNow and secretSolved ~= true then
+		markNookSolved()
+	end
+	secretSolved = solvedNow
 end)
 
 -- ── Frame loop ────────────────────────────────────────────────────────────

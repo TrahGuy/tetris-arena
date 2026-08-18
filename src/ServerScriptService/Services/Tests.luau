@@ -21,7 +21,7 @@
 --
 -- Modules are still resolved inside run() so a caller *can* pass a clone.
 local Board, Bag, SRS, Attack, Net, Pieces, Tuning, BotService, MatchInstance, Stats, Practice,
-	GlobalRank, Enums, SkinData
+	GlobalRank, Enums, SkinData, PuzzleService
 
 local T = {}
 local passed, failed, log = 0, 0, {}
@@ -1481,7 +1481,7 @@ function T.skinMigration()
 	-- The merge that runs on save, where two servers can disagree.
 	local mine = { ownedSkins = { classic = true, golden = true }, equippedSkin = "golden" }
 	local theirs = { ownedSkins = { classic = true, diamond = true }, equippedSkin = "diamond" }
-	local union = Stats.mergeOwnershipForTest(theirs, mine)
+	local union = Stats.mergeProgressForTest(theirs, mine)
 	check("migration: a grant made elsewhere survives this server's save",
 		union.ownedSkins.diamond == true)
 	check("migration: and so does this server's", union.ownedSkins.golden == true)
@@ -1537,6 +1537,324 @@ function T.skinIsCosmetic()
 		m:ownsMessage({ matchId = 5150, skinId = "galaxy" }))
 	check("cosmetic: and a wrong id is still refused",
 		not m:ownsMessage({ matchId = 1, skinId = "galaxy" }))
+end
+
+-- ── Secret puzzle (Phase 14) ──────────────────────────────────────────────
+
+-- A nook of the same shape as the built one, made of throwaway parts. The real
+-- one is a single shared object in the live world; a test that drove it would
+-- be moving the blocks a player might be standing in front of.
+local function fakeNook(slotIndices: { number }?, pieceIndices: { number }?, puzzle: any)
+	local container = Instance.new("Folder")
+	container.Name = "SecretForTest"
+	local board = Instance.new("Folder")
+	board.Name = "Board"
+	board:SetAttribute("Puzzle", puzzle == nil and "T" or puzzle)
+	board:SetAttribute("Solved", false)
+	board.Parent = container
+
+	for i, index in ipairs(slotIndices or { 13, 14, 15, 19 }) do
+		local slot = Instance.new("Part")
+		slot.Name = "Slot"
+		slot.Anchored = true
+		slot.Size = Vector3.new(4.4, 3.8, 0.4)
+		slot.Position = Vector3.new(100 + i * 5, 10, -100)
+		slot.Transparency = 0.85
+		slot:SetAttribute("SlotIndex", index)
+		slot.Parent = board
+	end
+	for i, index in ipairs(pieceIndices or { 1, 2, 3, 4 }) do
+		local piece = Instance.new("Part")
+		piece.Name = "LoosePiece"
+		piece.Anchored = true
+		piece.Size = Vector3.new(4, 3.6, 1.6)
+		piece.Position = Vector3.new(100 + i * 3, 2, -110)
+		piece:SetAttribute("PieceIndex", index)
+		piece.Parent = container
+	end
+	container.Parent = workspace
+	return container
+end
+
+-- A player-shaped table with a character that has somewhere to stand.
+local function nookPlayer(name: string, at: Vector3)
+	local char = Instance.new("Model")
+	char.Name = name
+	local root = Instance.new("Part")
+	root.Name = "HumanoidRootPart"
+	root.Anchored = true
+	root.Size = Vector3.new(2, 2, 1)
+	root.Position = at
+	root.Parent = char
+	char.Parent = workspace
+	-- Parent stands in for "still in the game", which is what step() checks.
+	return { Name = name, Character = char, Parent = workspace, _root = root, _char = char }
+end
+
+local function fakeStats(solved: boolean?)
+	local f = { solvedFlag = solved == true, completions = 0, profile = {} }
+	f.getProfile = function() return f.profile end
+	f.hasSolvedSecret = function() return f.solvedFlag end
+	f.completeSecretPuzzle = function()
+		if f.solvedFlag then return "already solved" end
+		f.solvedFlag = true
+		f.completions += 1
+		return "completed"
+	end
+	return f
+end
+
+local function fakeMatchmaking()
+	local f = { inMatch = {}, queued = {} }
+	f.matchFor = function(p) return f.inMatch[p] end
+	f.isQueued = function(p) return f.queued[p] == true end
+	return f
+end
+
+function T.puzzleGeometry()
+	-- The shape the world is required to have.
+	local ok, why = PuzzleService.validate({ puzzle = "T", slots = { 13, 14, 15, 19 },
+		pieces = { 1, 2, 3, 4 } })
+	check("puzzle: the built nook validates", ok, why)
+
+	local bad = {
+		{ { puzzle = "L", slots = { 13, 14, 15, 19 }, pieces = { 1, 2, 3, 4 } }, "wrong puzzle" },
+		{ { puzzle = "T", slots = { 13, 14, 15 }, pieces = { 1, 2, 3, 4 } }, "three slots" },
+		{ { puzzle = "T", slots = { 13, 14, 15, 19 }, pieces = { 1, 2, 3 } }, "three pieces" },
+		{ { puzzle = "T", slots = { 13, 13, 15, 19 }, pieces = { 1, 2, 3, 4 } }, "duplicate slot" },
+		{ { puzzle = "T", slots = { 13, 14, 15, 19 }, pieces = { 1, 1, 3, 4 } }, "duplicate piece" },
+		{ { puzzle = "T", slots = { 13, 14, 15, "x" }, pieces = { 1, 2, 3, 4 } }, "slot is not a number" },
+		{ { puzzle = "T", slots = { 13, 14, 15, 19 }, pieces = { 1, 2, 3, 4.5 } }, "piece is fractional" },
+		{ { puzzle = "T", pieces = { 1, 2, 3, 4 } }, "no slots at all" },
+		{ nil, "nothing found" },
+	}
+	for _, case in ipairs(bad) do
+		local good = PuzzleService.validate(case[1])
+		check("puzzle: rejected — " .. case[2], not good)
+	end
+
+	-- And the same rules applied to real geometry.
+	local nook = fakeNook()
+	local svc = PuzzleService.new({ stats = fakeStats(), matchmaking = fakeMatchmaking() })
+	local bound = svc:bind(nook)
+	check("puzzle: binds to a well-formed nook", bound)
+	eq("puzzle: found four slots", #(function()
+		local n = {} for k in pairs(svc.slots) do table.insert(n, k) end return n
+	end)(), 4)
+	eq("puzzle: found four pieces", #(function()
+		local n = {} for k in pairs(svc.pieces) do table.insert(n, k) end return n
+	end)(), 4)
+	check("puzzle: hung a prompt on every one of them", #svc.prompts == 8)
+	nook:Destroy()
+
+	local broken = fakeNook({ 13, 14 }, { 1, 2, 3, 4 })
+	local svc2 = PuzzleService.new({ stats = fakeStats(), matchmaking = fakeMatchmaking() })
+	local ok2 = svc2:bind(broken)
+	check("puzzle: a malformed nook disables rather than throwing", not ok2)
+	check("puzzle: and stays disabled", not svc2.enabled)
+	-- Nothing on a disabled puzzle may do anything.
+	local p = nookPlayer("Nobody", Vector3.new(100, 2, -110))
+	eq("puzzle: taking from a disabled puzzle does nothing",
+		svc2:takePiece(p, 1, 0), "no such piece")
+	broken:Destroy()
+	p._char:Destroy()
+
+	local svc3 = PuzzleService.new({})
+	check("puzzle: binding to nothing is safe", not svc3:bind(nil))
+end
+
+function T.puzzleSolving()
+	local nook = fakeNook()
+	local stats, mm = fakeStats(), fakeMatchmaking()
+	local svc = PuzzleService.new({ stats = stats, matchmaking = mm })
+	svc:bind(nook)
+	local near = Vector3.new(110, 4, -105)
+	local a = nookPlayer("Solver", near)
+
+	-- Selection.
+	eq("puzzle: a piece can be taken", svc:takePiece(a, 1, 0), "held")
+	eq("puzzle: one block at a time", svc:takePiece(a, 2, 0), "already holding one")
+	eq("puzzle: a piece that is not there", svc:takePiece(a, 9, 0), "no such piece")
+
+	-- Placement.
+	eq("puzzle: it fills an empty slot", svc:placePiece(a, 13, 0), "placed")
+	eq("puzzle: and nothing is in hand afterwards", svc:placePiece(a, 14, 0), "nothing in hand")
+	eq("puzzle: a placed piece cannot be taken again", svc:takePiece(a, 1, 0), "already placed")
+	eq("puzzle: a slot that is not there", svc:placePiece(a, 99, 0), "no such slot")
+
+	svc:takePiece(a, 2, 0)
+	eq("puzzle: an occupied slot refuses a second block", svc:placePiece(a, 13, 0), "slot is full")
+	eq("puzzle: so it goes in an empty one", svc:placePiece(a, 14, 0), "placed")
+	eq("puzzle: three of four is not a solve", stats.completions, 0)
+	svc:takePiece(a, 3, 0)
+	svc:placePiece(a, 15, 0)
+	eq("puzzle: still not solved on three", stats.completions, 0)
+	check("puzzle: the board is not marked solved yet",
+		nook.Board:GetAttribute("Solved") == false)
+
+	svc:takePiece(a, 4, 0)
+	local result = svc:placePiece(a, 19, 0)
+	eq("puzzle: the fourth block solves it", result, "solved:completed")
+	eq("puzzle: exactly one completion", stats.completions, 1)
+	check("puzzle: the board shows solved", nook.Board:GetAttribute("Solved") == true)
+
+	-- The world goes back for the next player.
+	svc:step(PuzzleService.CELEBRATE + 1)
+	check("puzzle: the board is unsolved again after the celebration",
+		nook.Board:GetAttribute("Solved") == false)
+	check("puzzle: and the session is released", svc.session == nil)
+	local home = true
+	for index, part in pairs(svc.pieces) do
+		if (part.Position - svc.home[index].cframe.Position).Magnitude > 0.01 then home = false end
+	end
+	check("puzzle: every block is back where it started", home)
+
+	-- A second player can now solve it, and only they are paid.
+	local b = nookPlayer("Second", near)
+	stats.solvedFlag = false
+	eq("puzzle: the next player can claim it", svc:takePiece(b, 1, 100), "held")
+	check("puzzle: and it is theirs", svc.session.player == b)
+	a._char:Destroy()
+	b._char:Destroy()
+	nook:Destroy()
+end
+
+function T.puzzleSessions()
+	local nook = fakeNook()
+	local stats, mm = fakeStats(), fakeMatchmaking()
+	local svc = PuzzleService.new({ stats = stats, matchmaking = mm })
+	svc:bind(nook)
+	local near = Vector3.new(110, 4, -105)
+	local a = nookPlayer("First", near)
+	local b = nookPlayer("Second", near)
+
+	eq("session: the first player claims it", svc:takePiece(a, 1, 0), "held")
+	eq("session: the second cannot take a block",
+		svc:takePiece(b, 2, 0), "someone else is solving it")
+	eq("session: nor place one", svc:placePiece(b, 13, 0), "someone else is solving it")
+	check("session: and the first player still holds it", svc.session.player == a)
+
+	-- Timeout releases it, and puts the blocks back.
+	svc:step(PuzzleService.TIMEOUT + 1)
+	check("session: it times out", svc.session == nil)
+	eq("session: after which the second player can claim it", svc:takePiece(b, 1, 200), "held")
+
+	-- Leaving releases it.
+	svc:playerLeaving(b)
+	check("session: leaving releases the puzzle", svc.session == nil)
+
+	-- A disconnected solver is cleaned up by the loop even without the event.
+	svc:takePiece(a, 1, 300)
+	a.Parent = nil
+	svc:step(301)
+	check("session: a solver who is gone releases it", svc.session == nil)
+	a.Parent = workspace
+
+	-- A character that vanished mid-session.
+	svc:takePiece(a, 1, 400)
+	local savedChar = a.Character
+	a.Character = nil
+	svc:step(401)
+	check("session: a solver with no character releases it", svc.session == nil)
+	a.Character = savedChar
+
+	-- Distance, checked on the server whatever the prompt believed.
+	local far = nookPlayer("Distant", Vector3.new(400, 4, 400))
+	eq("session: the puzzle cannot be solved from across the lobby",
+		svc:takePiece(far, 1, 500), "too far away")
+	check("session: and no session was opened", svc.session == nil)
+
+	-- Busy players do not get to reserve it.
+	mm.inMatch[a] = { id = 1 }
+	eq("session: a player in a match cannot claim it", svc:takePiece(a, 1, 600), "in a match")
+	mm.inMatch[a] = nil
+	mm.queued[a] = true
+	eq("session: nor a queued one", svc:takePiece(a, 1, 600), "queued")
+	mm.queued[a] = nil
+
+	-- And a solver who queues mid-puzzle loses the reservation rather than
+	-- stranding the blocks when the match pulls them away.
+	eq("session: claim again", svc:takePiece(a, 1, 700), "held")
+	mm.queued[a] = true
+	svc:step(701)
+	check("session: queueing mid-solve releases it", svc.session == nil)
+	mm.queued[a] = nil
+
+	-- Someone who has already solved it does not reserve a shared object for a
+	-- replay that cannot pay.
+	stats.solvedFlag = true
+	eq("session: an already-solved player is turned away",
+		svc:takePiece(a, 1, 800), "already solved")
+	check("session: leaving the nook free", svc.session == nil)
+
+	a._char:Destroy()
+	b._char:Destroy()
+	far._char:Destroy()
+	nook:Destroy()
+end
+
+-- The persistent half: what the profile records, and what survives a save.
+function T.puzzlePersistence()
+	local fresh = Stats.migrateForTest(nil)
+	eq("secret: a new profile has not solved it", fresh.secretPuzzleSolved, false)
+	local legacy = Stats.migrateForTest({ wins = 3, rating = 1100 })
+	eq("secret: an old profile migrates to unsolved", legacy.secretPuzzleSolved, false)
+	eq("secret: keeping everything else", legacy.wins, 3)
+	local done = Stats.migrateForTest({ secretPuzzleSolved = true })
+	eq("secret: a solved profile stays solved", done.secretPuzzleSolved, true)
+	local junk = Stats.migrateForTest({ secretPuzzleSolved = "yes" })
+	eq("secret: a non-boolean is ignored", junk.secretPuzzleSolved, false)
+
+	-- Completion only ever moves one way.
+	local storedTrue = Stats.mergeProgressForTest({ secretPuzzleSolved = true },
+		{ ownedSkins = {}, equippedSkin = "classic", secretPuzzleSolved = false })
+	eq("secret: an older server cannot erase a completion", storedTrue.secretPuzzleSolved, true)
+	local storedFalse = Stats.mergeProgressForTest({ secretPuzzleSolved = false },
+		{ ownedSkins = {}, equippedSkin = "classic", secretPuzzleSolved = true })
+	eq("secret: and a new completion is written", storedFalse.secretPuzzleSolved, true)
+	local neither = Stats.mergeProgressForTest({},
+		{ ownedSkins = {}, equippedSkin = "classic", secretPuzzleSolved = false })
+	eq("secret: unsolved stays unsolved", neither.secretPuzzleSolved, false)
+
+	-- The reward, through the real entitlement path.
+	local p = fakePlayer(-301, "Finder")
+	Stats.load(p)
+	eq("secret: starts unsolved", Stats.hasSolvedSecret(p), false)
+	check("secret: and without the reward", not Stats.ownsSkin(p, SkinData.SECRET_ID))
+	eq("secret: solving completes it", Stats.completeSecretPuzzle(p), "completed")
+	eq("secret: which is recorded", Stats.hasSolvedSecret(p), true)
+	check("secret: and grants the secret skin", Stats.ownsSkin(p, SkinData.SECRET_ID))
+	eq("secret: solving twice pays nothing", Stats.completeSecretPuzzle(p), "already solved")
+
+	-- Someone who already owns the skin still gets the completion recorded.
+	local q = fakePlayer(-302, "Owner")
+	Stats.load(q)
+	eq("secret: granted the skin by other means", Stats.grantSkin(q, SkinData.SECRET_ID), "granted")
+	eq("secret: has not solved the puzzle", Stats.hasSolvedSecret(q), false)
+	eq("secret: solving still completes", Stats.completeSecretPuzzle(q), "completed")
+	eq("secret: and is recorded", Stats.hasSolvedSecret(q), true)
+	check("secret: the skin is still owned once", Stats.ownsSkin(q, SkinData.SECRET_ID))
+
+	-- A profile that solved it but lost the skin is healed on load.
+	local healed = Stats.migrateForTest({ secretPuzzleSolved = true, ownedSkins = {} })
+	eq("secret: a solved profile with no reward keeps the completion",
+		healed.secretPuzzleSolved, true)
+
+	-- Nothing about the puzzle touches ranked or the simulation.
+	local before = Stats.get(p)
+	eq("secret: rating untouched", before.rating, 1000)
+	eq("secret: ranked wins untouched", before.rankedWins, 0)
+	eq("secret: ranked losses untouched", before.rankedLosses, 0)
+	eq("secret: ranked draws untouched", before.rankedDraws, 0)
+	eq("secret: matches untouched", before.matches, 0)
+
+	-- The client's write paths cannot reach any of it.
+	Stats.applySettings(p, { secretPuzzleSolved = false, ownedSkins = {}, das = 140 })
+	eq("secret: SaveSettings cannot unsolve it", Stats.hasSolvedSecret(p), true)
+	eq("secret: nor remove the reward", Stats.ownsSkin(p, SkinData.SECRET_ID), true)
+	eq("secret: settings still apply", Stats.get(p).das, 140)
+	eq("secret: the reward is the catalog's secret skin", SkinData.SECRET_ID, "galaxy")
+	check("secret: which is not owned by default", not SkinData.get(SkinData.SECRET_ID).defaultOwned)
 end
 
 -- Human vs human, without two clients.
@@ -1684,6 +2002,7 @@ function T.run(root: Instance?, services: Instance?)
 	GlobalRank = require((services :: any).GlobalRank)
 	Enums = require((root :: any).Enums)
 	SkinData = require((root :: any).SkinData)
+	PuzzleService = require((services :: any).PuzzleService)
 
 	passed, failed, log = 0, 0, {}
 	local order = { "bag", "srs", "spawnAndDrop", "lineClear", "quadAndB2B", "garbage",
@@ -1693,6 +2012,7 @@ function T.run(root: Instance?, services: Instance?)
 		"tspinAuthority", "globalRankIndex", "globalRankBoard", "globalRankFallback",
 		"globalRankWiring", "globalRankRender",
 		"skinCatalog", "skinOwnership", "skinMigration", "skinIsCosmetic",
+		"puzzleGeometry", "puzzleSolving", "puzzleSessions", "puzzlePersistence",
 		"bots", "twoPlayer" }
 	for _, name in ipairs(order) do
 		local ok, err = pcall(T[name])

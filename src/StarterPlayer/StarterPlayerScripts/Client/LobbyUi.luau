@@ -351,6 +351,43 @@ function LobbyUi:setPrompt(title: string?, sub: string?, progress: number?)
 	self.dwellBar.Size = UDim2.new(progress or 0, 0, 0, 3)
 end
 
+-- A small, brief thing in the corner. The reward for a hidden puzzle should
+-- feel found rather than sold, so this is deliberately not a modal, not
+-- centred, and not something the player has to dismiss.
+function LobbyUi:toast(title: string, sub: string?, colour: Color3?)
+	if not self.toastCard then
+		local card_ = Theme.panel(self.chrome, {
+			BackgroundTransparency = 0.05,
+			AnchorPoint = Vector2.new(0, 1),
+			Position = UDim2.new(0, 18, 1, -18),
+			Size = UDim2.fromOffset(300, 62),
+			Visible = false,
+		})
+		self.toastTitle = Theme.label(card_, "", {
+			Font = Theme.F.display, TextSize = 18, TextColor3 = Theme.C.violet,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Position = UDim2.fromOffset(16, 8), Size = UDim2.fromOffset(268, 22),
+		})
+		self.toastSub = Theme.label(card_, "", {
+			TextColor3 = Theme.C.muted, TextSize = 13,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			Position = UDim2.fromOffset(16, 30), Size = UDim2.fromOffset(268, 18),
+		})
+		self.toastCard = card_
+	end
+	self.toastTitle.Text = title
+	self.toastTitle.TextColor3 = colour or Theme.C.violet
+	self.toastSub.Text = sub or ""
+	self.toastCard.Visible = true
+	self.toastSeq = (self.toastSeq or 0) + 1
+	local mine = self.toastSeq
+	task.delay(6, function()
+		if self.toastSeq == mine and self.toastCard then
+			self.toastCard.Visible = false
+		end
+	end)
+end
+
 function LobbyUi:showQueue(on: boolean)
 	self.queue.Visible = on
 	self.chrome.Visible = not on

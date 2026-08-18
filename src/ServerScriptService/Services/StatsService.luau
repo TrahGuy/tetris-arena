@@ -51,6 +51,11 @@ local DEFAULT = {
 	-- every player on the server.
 	ownedSkins = {},
 	equippedSkin = SkinData.DEFAULT_ID,
+	-- Solving the secret nook is its own fact, separate from owning what it
+	-- pays out. An account can hold galaxy from a debug grant, an event or a
+	-- future purchase without ever having found the puzzle, and solving it
+	-- while already owning the skin still counts as having solved it.
+	secretPuzzleSolved = false,
 }
 
 -- Elo. The RANKED pad was queuing exactly like quick play, which made the label
@@ -197,7 +202,7 @@ end
 -- some server actually granted, because nothing else ever reaches this table.
 --
 -- Equipped is a preference, so it follows the settings rule: last writer wins.
-local function unionOwnership(merged: any, profile: any): any
+local function unionProgress(merged: any, profile: any): any
 	local owned = type(merged.ownedSkins) == "table" and merged.ownedSkins or {}
 	if type(profile.ownedSkins) == "table" then
 		for id, value in pairs(profile.ownedSkins) do
@@ -208,6 +213,10 @@ local function unionOwnership(merged: any, profile: any): any
 	merged.ownedSkins = owned
 	merged.equippedSkin = owned[profile.equippedSkin] and profile.equippedSkin
 		or SkinData.DEFAULT_ID
+	-- Completion only ever moves one way. With no session lock an older server
+	-- can save after a newer one, and finding the secret is not something a
+	-- stale write gets to undo.
+	merged.secretPuzzleSolved = (merged.secretPuzzleSolved or profile.secretPuzzleSolved) == true
 	return merged
 end
 
@@ -222,6 +231,14 @@ local function merge(saved: any?): any
 	end
 	mergeSkins(p, saved)
 	return p
+end
+
+local function grantCore(p: any, userId: number, skinId: any): string
+	if not SkinData.exists(skinId) then return "unknown skin" end
+	if p.ownedSkins[skinId] then return "already" end
+	p.ownedSkins[skinId] = true
+	dirty[userId] = true
+	return "granted"
 end
 
 function StatsService.load(player: Player)
@@ -240,6 +257,12 @@ function StatsService.load(player: Player)
 		end
 	end
 	profiles[id] = merge(saved)
+	-- A profile that solved the puzzle but does not own what it pays out has
+	-- lost the entitlement somewhere, not the achievement. Put it back before
+	-- the client is told anything, so it sees one coherent profile.
+	if profiles[id].secretPuzzleSolved then
+		grantCore(profiles[id], id, SkinData.SECRET_ID)
+	end
 	if player.Parent then
 		Remotes.Profile:FireClient(player, profiles[id])
 	end
@@ -287,7 +310,7 @@ function StatsService.save(player: Player)
 				merged[k] = profile[k]
 			end
 
-			unionOwnership(merged, profile)
+			unionProgress(merged, profile)
 			return merged
 		end)
 	end)
@@ -312,14 +335,42 @@ end
 function StatsService.grantSkin(player: Player, skinId: any): string
 	local p = profiles[player.UserId]
 	if not p then return "no profile" end
-	if not SkinData.exists(skinId) then return "unknown skin" end
-	if p.ownedSkins[skinId] then return "already" end
-	p.ownedSkins[skinId] = true
+	local result = grantCore(p, player.UserId, skinId)
+	if result == "granted" and player.Parent then
+		Remotes.Profile:FireClient(player, p)
+	end
+	return result
+end
+
+-- The secret nook's payout, as one transaction.
+--
+-- Completion and entitlement move together and the client is told once, so it
+-- can never see a profile that has solved the puzzle but does not own the skin
+-- — or the reverse. Idempotent: a duplicate solve changes nothing and pushes
+-- nothing.
+--
+-- Returns "completed", "already solved" or "no profile".
+function StatsService.completeSecretPuzzle(player: Player): string
+	local p = profiles[player.UserId]
+	if not p then return "no profile" end
+	if p.secretPuzzleSolved then return "already solved" end
+	p.secretPuzzleSolved = true
+	grantCore(p, player.UserId, SkinData.SECRET_ID)
 	dirty[player.UserId] = true
 	if player.Parent then
 		Remotes.Profile:FireClient(player, p)
 	end
-	return "granted"
+	return "completed"
+end
+
+function StatsService.hasSolvedSecret(player: Player): boolean
+	local p = profiles[player.UserId]
+	return (p and p.secretPuzzleSolved == true) or false
+end
+
+-- PuzzleService needs to know a profile is loaded before it reserves the nook.
+function StatsService.getProfile(player: Player): any?
+	return profiles[player.UserId]
 end
 
 -- The two seams the suite needs: what a stored profile becomes on load, and
@@ -329,8 +380,8 @@ function StatsService.migrateForTest(saved: any?): any
 	return merge(saved)
 end
 
-function StatsService.mergeOwnershipForTest(stored: any, profile: any): any
-	return unionOwnership(merge(stored), profile)
+function StatsService.mergeProgressForTest(stored: any, profile: any): any
+	return unionProgress(merge(stored), profile)
 end
 
 function StatsService.ownsSkin(player: Player, skinId: any): boolean

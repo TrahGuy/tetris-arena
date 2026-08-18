@@ -83,6 +83,15 @@ Ownership merges as a UNION on save (no session lock). Equipped is last-write-wi
 Retired ids are dropped from presentation, never migrated; an invalid equipped id falls back to the default.
 Colourblind mode overrides skin piece colours. Cosmetics never reach Board, Attack, the bag or the network contract.
 
+## Secret puzzle
+
+Geometry: `workspace.Lobby.Secret`, built by `04_zones.luau`. Board folder carries `Puzzle = "T"`; four Slot parts carry `SlotIndex` 13/14/15/19; four LoosePiece parts carry `PieceIndex` 1..4. Discovered, never duplicated in code.
+Reward: `SkinData.SECRET_ID` = `galaxy`, granted through `StatsService.grantSkin`.
+Completion: profile field `secretPuzzleSolved`, server-authoritative, **monotonic** (merges with OR), separate from owning the skin.
+Interaction: server-owned ProximityPrompts. No puzzle remote exists; the client cannot claim a solve or a grant. Server re-validates distance, match and queue state.
+Concurrency: one active solver; released on solve, timeout (45s), disconnect, lost character, match or queue.
+`Board.Solved` is temporary world state for the celebration only and always returns to false.
+
 ## Network
 
 - Start: seed + opponent name + timestamp, once.

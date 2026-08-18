@@ -16,6 +16,7 @@ local Matchmaking = require(Services.MatchmakingService)
 local Stats = require(Services.StatsService)
 local Practice = require(Services.PracticeService)
 local Museum = require(Services.MuseumService)
+local PuzzleService = require(Services.PuzzleService)
 
 Matchmaking.setStatsService(Stats)
 
@@ -27,6 +28,16 @@ do
 		warn(("[Museum] %d catalog skins have no exhibit in the world"):format(missing))
 	end
 	print(("[BlockArena] museum: %d exhibits wired"):format(wired))
+end
+
+-- The secret nook. Discovers the unfinished board Phase 1 built and hangs
+-- prompts on it; if the geometry is not what it expects it warns once and stays
+-- switched off rather than taking the lobby down with it.
+local Puzzle = PuzzleService.new({ stats = Stats, matchmaking = Matchmaking })
+do
+	local lobby = workspace:FindFirstChild("Lobby")
+	local ok, why = Puzzle:bind(lobby and lobby:FindFirstChild("Secret"))
+	print(("[BlockArena] secret puzzle: %s"):format(ok and "ready" or why))
 end
 
 -- Live-tunable constants land on a folder so they can be adjusted from the
@@ -127,6 +138,9 @@ Players.PlayerRemoving:Connect(function(player)
 	-- and the rating need the profile to still be loaded.
 	Matchmaking.playerLeaving(player)
 	Practice.forget(player)
+	-- A solver who disconnects must not leave the nook reserved, or its blocks
+	-- stuck in the wall.
+	Puzzle:playerLeaving(player)
 	for _, limiter in pairs(limits) do
 		limiter:forget(player)
 	end
@@ -152,6 +166,9 @@ task.defer(Stats.refreshLeaderboard)
 
 RunService.Heartbeat:Connect(function(dt)
 	Matchmaking.step(dt)
+	-- Timeout, a solver who wandered off to queue, a character that vanished:
+	-- one place decides the session is over.
+	Puzzle:step(os.clock())
 end)
 
 -- Live match state on an attribute. A running server shares nothing else with
@@ -165,8 +182,14 @@ task.spawn(function()
 		task.wait(0.5)
 		debugFolder:SetAttribute("Matchmaking", Matchmaking.debugSummary())
 		debugFolder:SetAttribute("Players", #Players:GetPlayers())
-		-- Whether the global board is live, how old its page is, and why not if
-		-- not. Attributes rather than prints: this ticks twice a second.
+		-- Attributes rather than prints: this loop ticks twice a second.
+		local q = Puzzle:status(os.clock())
+		debugFolder:SetAttribute("PuzzleStatus", q.status)
+		debugFolder:SetAttribute("PuzzleSolver", q.solver)
+		debugFolder:SetAttribute("PuzzlePlaced", q.placed)
+		debugFolder:SetAttribute("PuzzleHeld", q.held)
+		debugFolder:SetAttribute("PuzzleSessionAge", q.age)
+		-- Whether the global board is live, how old its page is, and why not.
 		local g = Stats.globalStatus(os.clock())
 		debugFolder:SetAttribute("GlobalRankStatus", g.status)
 		debugFolder:SetAttribute("GlobalRankRows", g.rows)
